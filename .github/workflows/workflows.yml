@@ -11,6 +11,9 @@ jobs:
   test:
     name: Run tests and collect coverage
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # 允许 checkout 代码
+      pull-requests: write # 允许在 PR 中发表评论
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,9 +27,10 @@ jobs:
         run: go mod download
 
       - name: Run tests
-        run: UTCOVERPKG=$(go list ./... | grep -vE "vendor|example|mock") && go test -race -timeout=2m -v -cover -coverprofile=coverage.txt -coverpkg=$(echo $UTCOVERPKG | tr ' ' ',') $UTCOVERPKG | tee unittest.txt
+        run: make test
 
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.txt
