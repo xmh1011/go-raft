@@ -8,6 +8,38 @@ import (
 	"github.com/xmh1011/go-raft/param"
 )
 
+// InstallSnapshot 是 Follower 上的 RPC 处理函数，用于接收并安装 Leader 发来的快照。
+func (r *Raft) InstallSnapshot(args *param.InstallSnapshotArgs, reply *param.InstallSnapshotReply) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// 1. 处理任期检查。如果 Leader 的任期有效，则继续；否则拒绝。
+	if !r.handleSnapshotTerm(args, reply) {
+		return nil
+	}
+
+	log.Printf("[Snapshot] Node %d received snapshot from leader %d (lastIncludedIndex=%d)", r.id, args.LeaderID, args.LastIncludedIndex)
+
+	// 2. 将快照持久化到存储并压缩本地日志。
+	snapshot := param.NewSnapshot(args.LastIncludedIndex, args.LastIncludedTerm, args.Data)
+	if err := r.persistSnapshot(snapshot); err != nil {
+		log.Printf("[ERROR] Node %d failed to persist snapshot: %v", r.id, err)
+		return err
+	}
+
+	// 3. 将快照数据应用到上层状态机
+	if err := r.stateMachine.ApplySnapshot(snapshot.Data); err != nil {
+		log.Printf("[ERROR] Node %d failed to apply snapshot to state machine: %v", r.id, err)
+		return err
+	}
+
+	// 4. 更新本地的 commitIndex 和 lastApplied 索引。
+	r.updateStateAfterSnapshot(snapshot.LastIncludedIndex)
+
+	log.Printf("[Snapshot] Node %d successfully installed snapshot. lastApplied is now %d.", r.id, r.lastApplied)
+	return nil
+}
+
 // TakeSnapshot 由上层应用（状态机）在合适的时候调用，以触发一次快照。
 // logSizeThreshold 是触发快照的日志大小阈值（例如，字节数或条目数）。
 func (r *Raft) TakeSnapshot(logSizeThreshold int) {
@@ -55,37 +87,6 @@ func (r *Raft) createSnapshot() (*param.Snapshot, error) {
 
 	snapshot := param.NewSnapshot(snapshotIndex, snapshotTermEntry.Term, snapshotData)
 	return snapshot, nil
-}
-
-// InstallSnapshot 是 Follower 上的 RPC 处理函数，用于接收并安装 Leader 发来的快照。
-func (r *Raft) InstallSnapshot(args *param.InstallSnapshotArgs, reply *param.InstallSnapshotReply) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// 1. 处理任期检查。如果 Leader 的任期有效，则继续；否则拒绝。
-	if !r.handleSnapshotTerm(args, reply) {
-		return
-	}
-
-	log.Printf("[Snapshot] Node %d received snapshot from leader %d (lastIncludedIndex=%d)", r.id, args.LeaderID, args.LastIncludedIndex)
-
-	// 2. 将快照持久化到存储并压缩本地日志。
-	snapshot := param.NewSnapshot(args.LastIncludedIndex, args.LastIncludedTerm, args.Data)
-	if err := r.persistSnapshot(snapshot); err != nil {
-		log.Printf("[ERROR] Node %d failed to persist snapshot: %v", r.id, err)
-		return
-	}
-
-	// 3. 将快照数据应用到上层状态机
-	if err := r.stateMachine.ApplySnapshot(snapshot.Data); err != nil {
-		log.Printf("[ERROR] Node %d failed to apply snapshot to state machine: %v", r.id, err)
-		return
-	}
-
-	// 4. 更新本地的 commitIndex 和 lastApplied 索引。
-	r.updateStateAfterSnapshot(snapshot.LastIncludedIndex)
-
-	log.Printf("[Snapshot] Node %d successfully installed snapshot. lastApplied is now %d.", r.id, r.lastApplied)
 }
 
 // handleSnapshotTerm 负责处理 InstallSnapshot RPC 中的任期检查和心跳逻辑。

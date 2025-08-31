@@ -75,7 +75,8 @@ func TestInstallSnapshot_Success(t *testing.T) {
 	)
 
 	// --- Act ---
-	r.InstallSnapshot(args, reply)
+	err := r.InstallSnapshot(args, reply)
+	assert.NoError(t, err, "InstallSnapshot should not return error")
 
 	// --- Assert ---
 	// 验证 Raft 内部状态是否被正确更新
@@ -103,7 +104,8 @@ func TestInstallSnapshot_StaleTerm(t *testing.T) {
 	reply := &param.InstallSnapshotReply{}
 
 	// --- Act ---
-	r.InstallSnapshot(args, reply)
+	err := r.InstallSnapshot(args, reply)
+	assert.NoError(t, err, "InstallSnapshot should not return error")
 
 	// --- Assert ---
 	// 验证 reply 中的任期是否被正确设置为本地的更高任期。
@@ -224,7 +226,9 @@ func TestInstallSnapshot_FailsOnApplyError(t *testing.T) {
 	)
 
 	// --- Act ---
-	r.InstallSnapshot(args, reply)
+	err := r.InstallSnapshot(args, reply)
+	assert.Error(t, err, "InstallSnapshot should return an error when the state machine fails")
+	assert.Equal(t, err, errors.New("failed to decode snapshot"))
 
 	// --- Assert ---
 	// 验证 Raft 的内部状态没有因为失败的操作而被错误地更新。

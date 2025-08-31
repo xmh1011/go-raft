@@ -156,7 +156,8 @@ func TestAppendEntries_FollowerLogic(t *testing.T) {
 		r := &Raft{currentTerm: 5, mu: sync.Mutex{}}
 		args := &param.AppendEntriesArgs{Term: 4} // Leader 任期为 4，落后于自己的 5
 		reply := &param.AppendEntriesReply{}
-		r.appendEntries(args, reply)
+		err := r.AppendEntries(args, reply)
+		assert.NoError(t, err, "AppendEntries should not return error")
 		assert.False(t, reply.Success, "should reject request with stale term")
 		assert.Equal(t, uint64(5), reply.Term, "should return current term")
 	})
@@ -168,7 +169,8 @@ func TestAppendEntries_FollowerLogic(t *testing.T) {
 		reply := &param.AppendEntriesReply{}
 		// Mock 本地日志在索引 10 处的任期是 5，与 Leader 的期望(4)不符
 		mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil)
-		r.appendEntries(args, reply)
+		err := r.AppendEntries(args, reply)
+		assert.NoError(t, err, "AppendEntries should not return error")
 		assert.False(t, reply.Success, "should reject request with inconsistent log")
 	})
 
@@ -209,7 +211,8 @@ func TestAppendEntries_FollowerLogic(t *testing.T) {
 		mockStore.EXPECT().GetEntry(uint64(11)).Return(&newEntries[0], nil)
 		mockSM.EXPECT().Apply(gomock.Any()).Return("success")
 
-		r.appendEntries(args, reply)
+		err := r.AppendEntries(args, reply)
+		assert.NoError(t, err, "AppendEntries should not return error")
 
 		// 等待后台的 applyLogs goroutine 将结果发送到 commitChan
 		select {

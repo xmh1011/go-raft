@@ -89,7 +89,7 @@ func (r *Raft) replicateLogsToPeer(peerId int) {
 	go func() {
 		reply := param.NewAppendEntriesReply()
 		if err := r.trans.SendAppendEntries(strconv.Itoa(peerId), args, reply); err != nil {
-			log.Printf("[Log Replication] Node %d failed to send appendEntries to %d: %s", r.id, peerId, err.Error())
+			log.Printf("[Log Replication] Node %d failed to send AppendEntries to %d: %s", r.id, peerId, err.Error())
 			return
 		}
 
@@ -168,7 +168,7 @@ func (r *Raft) handleSuccessfulAppendEntries(peerId int, args *param.AppendEntri
 
 // handleFailedAppendEntries 在收到失败的 AppendEntries 响应后调整 nextIndex。
 func (r *Raft) handleFailedAppendEntries(peerId int, reply *param.AppendEntriesReply) {
-	log.Printf("[Log Replication] Node %d rejected appendEntries from leader %d (ConflictIndex=%d, ConflictTerm=%d)", peerId, r.id, reply.ConflictIndex, reply.ConflictTerm)
+	log.Printf("[Log Replication] Node %d rejected AppendEntries from leader %d (ConflictIndex=%d, ConflictTerm=%d)", peerId, r.id, reply.ConflictIndex, reply.ConflictTerm)
 
 	// 根据论文中的优化策略，快速回退 nextIndex。
 	r.nextIndex[peerId] = reply.ConflictIndex
@@ -255,32 +255,33 @@ func (r *Raft) isReplicatedByMajority(index uint64) bool {
 	return matchCountOld >= majorityOld && matchCountNew >= majorityNew
 }
 
-// appendEntries 是 Follower 节点上的 RPC 处理函数，用于接收 Leader 的心跳和日志。
+// AppendEntries 是 Follower 节点上的 RPC 处理函数，用于接收 Leader 的心跳和日志。
 // 任期检查: 如果请求的任期号小于自己的当前任期，则拒绝。如果大于，则更新自己的任期并转为 Follower。
 // 一致性检查: 检查 PrevLogIndex 和 PrevLogTerm 是否与自己的日志匹配。如果不匹配，则拒绝请求并返回冲突信息，帮助 Leader 快速定位不一致点。
 // 日志追加: 如果一致性检查通过，则将新的日志条目追加到自己的日志中。
 // 更新 CommitIndex: 根据 Leader 发来的 LeaderCommit 来更新自己的 commitIndex。
-func (r *Raft) appendEntries(args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) {
+func (r *Raft) AppendEntries(args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// 1. 处理任期检查和心跳。如果 Leader 的任期小于自己，直接拒绝。
 	// 如果大于，则转为 Follower。无论哪种情况，只要是合法的 Leader，就重置选举计时器。
 	if !r.handleTermAndHeartbeat(args, reply) {
-		return
+		return nil
 	}
 
 	// 2. 进行日志一致性检查。
 	// 验证本地日志在 prevLogIndex 处是否与 Leader 发来的信息匹配。
 	if ok := r.checkLogConsistency(args, reply); !ok {
-		return
+		return nil
 	}
 
 	// 3. 追加并存储新的日志条目。
 	// 如果 Leader 发来了新的日志，则截断本地可能存在的冲突日志，并追加新日志。
 	if err := r.appendAndStoreEntries(args); err != nil {
 		reply.Success = false
-		return // 如果存储失败，则认为操作不成功。
+		log.Printf("[ERROR] Node %d failed to append entries: %v", r.id, err)
+		return err
 	}
 
 	// 4. 根据 Leader 的进度更新本地的 commitIndex。
@@ -288,6 +289,7 @@ func (r *Raft) appendEntries(args *param.AppendEntriesArgs, reply *param.AppendE
 
 	// 所有步骤都成功完成。
 	reply.Success = true
+	return nil
 }
 
 // handleTermAndHeartbeat 负责处理任期检查和重置选举计时器。

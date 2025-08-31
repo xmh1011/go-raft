@@ -89,6 +89,23 @@ func NewRaft(id int, peerIds []int, store storage.Storage, stateMachine storage.
 	return r
 }
 
+// ClientRequest 是处理来自客户端请求的 RPC 函数。
+// 它负责协调三个主要阶段：前置检查、提交并等待、处理最终结果。
+func (r *Raft) ClientRequest(args *param.ClientArgs, reply *param.ClientReply) error {
+	// 1. 执行前置检查。如果不是 Leader 或请求重复，则提前返回。
+	if proceed := r.preHandleClientRequest(args, reply); !proceed {
+		return nil
+	}
+
+	// 2. 将命令提交到 Raft 日志，并同步等待其被状态机应用。
+	result, ok, leaderId := r.Commit(args.Command)
+
+	// 3. 根据提交和等待的结果，最终填充客户端的响应。
+	r.finalizeClientReply(args, reply, result, ok, leaderId)
+
+	return nil
+}
+
 // getLogTerm 返回指定索引的日志条目的任期。
 func (r *Raft) getLogTerm(index uint64) (uint64, error) {
 	if index == 0 {
@@ -140,6 +157,54 @@ func (r *Raft) proposeToLog(command interface{}) (param.LogEntry, error) {
 	log.Printf("leader %d proposed new log entry at index %d", r.id, newIndex)
 
 	return newLogEntry, nil
+}
+
+// preHandleClientRequest 封装了所有在提交日志前需要进行的前置检查。
+// 返回值 bool 表示是否应继续处理该请求。
+func (r *Raft) preHandleClientRequest(args *param.ClientArgs, reply *param.ClientReply) bool {
+	if !r.isLeader() {
+		reply.NotLeader = true
+		reply.LeaderHint = r.knownLeaderID
+		return false
+	}
+	if r.isDuplicateRequest(args.ClientID, args.SequenceNum) {
+		reply.Success = true // 对于重复请求，直接返回成功。
+		return false
+	}
+	return true
+}
+
+// Commit 封装了将命令提交到 Raft 日志并等待其被应用的全过程。
+// 它返回从状态机获得的结果，一个表示成功的布尔值，以及当前的 Leader ID。
+func (r *Raft) Commit(command interface{}) (any, bool, int) {
+	index, _, isLeader := r.Submit(command)
+	if !isLeader {
+		// 在提交过程中，可能失去了 Leader 地位。
+		return nil, false, r.knownLeaderID
+	}
+
+	// 等待命令被状态机成功应用，或等待超时。
+	result, ok := r.waitForAppliedLog(index, 2*time.Second)
+	return result, ok, r.id
+}
+
+// finalizeClientReply 负责根据执行结果，最终构建给客户端的响应。
+func (r *Raft) finalizeClientReply(args *param.ClientArgs, reply *param.ClientReply, result any, ok bool, leaderId int) {
+	if ok {
+		// 命令成功应用。
+		r.mu.Lock()
+		r.clientSessions[args.ClientID] = args.SequenceNum
+		r.mu.Unlock()
+		reply.Success = true
+		reply.Result = result
+	} else {
+		// 如果失败，可能是因为超时，也可能是因为中途失去了 Leader 身份。
+		reply.Success = false
+		if !r.isLeader() {
+			reply.NotLeader = true
+			reply.LeaderHint = leaderId
+		}
+	}
 }
 
 // Submit 将一个普通的客户端命令追加到 Raft 日志中。
@@ -227,4 +292,43 @@ func (r *Raft) getAllPeerIDs() []int {
 		allPeers = append(allPeers, p)
 	}
 	return allPeers
+}
+
+// becomeFollower 将节点的状态更新为指定新任期的 Follower。
+// 它会持久化新状态，并且必须在持有锁的情况下被调用。
+func (r *Raft) becomeFollower(newTerm uint64) error {
+	log.Printf("[State Change] Node %d received higher term %d. Updating term and becoming follower.", r.id, newTerm)
+	r.currentTerm = newTerm
+	r.state = param.Follower
+	r.votedFor = -1 // 进入新任期时，重置投票记录。
+
+	if err := r.store.SetState(param.HardState{CurrentTerm: r.currentTerm, VotedFor: uint64(r.votedFor)}); err != nil {
+		log.Printf("[ERROR] Node %d failed to persist state after becoming follower: %v", r.id, err)
+		return err
+	}
+	return nil
+}
+
+// waitForAppliedLog 等待一个特定索引的日志被状态机应用。
+// 它通过一个注册在 notifyApply 映射中的 channel 来实现同步等待。
+func (r *Raft) waitForAppliedLog(index uint64, timeout time.Duration) (any, bool) {
+	r.mu.Lock()
+	// 创建一个通知 channel，并注册到 map 中。
+	notifyChan := make(chan any, 1)
+	r.notifyApply[index] = notifyChan
+	r.mu.Unlock()
+
+	// 等待 applyLogs 发出通知，或等待超时。
+	select {
+	case result := <-notifyChan:
+		log.Printf("[Client] Notified that log index %d has been applied.", index)
+		return result, true
+	case <-time.After(timeout):
+		log.Printf("[Client] Timed out waiting for log index %d to be applied.", index)
+		// 超时后，需要清理掉注册的 channel 以防内存泄漏。
+		r.mu.Lock()
+		delete(r.notifyApply, index)
+		r.mu.Unlock()
+		return nil, false
+	}
 }
