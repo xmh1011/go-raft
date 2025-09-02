@@ -67,9 +67,11 @@ func (s *Storage) GetEntry(index uint64) (*param.LogEntry, error) {
 	defer s.mu.RUnlock()
 
 	// 检查索引是否在当前日志范围内
-	if index < s.logOffset || index >= s.logOffset+uint64(len(s.log)) {
+	if index < s.logOffset+1 || index >= s.logOffset+uint64(len(s.log)) {
 		return nil, ErrLogNotFound
 	}
+
+	// index 对应的切片位置是 index - logOffset
 	return &s.log[index-s.logOffset], nil
 }
 
@@ -130,19 +132,25 @@ func (s *Storage) CompactLog(upToIndex uint64) error {
 	defer s.mu.Unlock()
 
 	if upToIndex < s.logOffset {
-		// 已经压缩过了
 		return nil
 	}
-	if upToIndex >= s.logOffset+uint64(len(s.log)) {
+
+	lastIndex := s.logOffset + uint64(len(s.log)) - 1
+	if upToIndex > lastIndex {
 		return ErrIndexOutOfBounds
 	}
 
-	sliceIndex := upToIndex - s.logOffset
-	// 保留 upToIndex 之后的所有日志
-	remainingLogs := make([]param.LogEntry, len(s.log)-int(sliceIndex))
-	copy(remainingLogs, s.log[sliceIndex:])
+	// 计算要丢弃的日志数量。
+	// upToIndex 对应的切片索引是 upToIndex - s.logOffset。
+	// 我们要保留这之后的所有条目，所以新切片从 (upToIndex - s.logOffset) + 1 开始。
+	sliceIndexToKeep := upToIndex - s.logOffset + 1
 
-	s.log = remainingLogs
+	// 创建一个包含新哑元条目的日志
+	newLog := make([]param.LogEntry, 1, 1+len(s.log)-int(sliceIndexToKeep))
+	newLog = append(newLog, s.log[sliceIndexToKeep:]...)
+
+	s.log = newLog
+	// 新的偏移量是最后一个被包含在快照中的索引
 	s.logOffset = upToIndex
 	return nil
 }

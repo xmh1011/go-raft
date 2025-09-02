@@ -158,3 +158,113 @@ func TestStartElection_LosesElection(t *testing.T) {
 	defer r.mu.Unlock()
 	assert.Equal(t, param.Follower, r.state, "expected state to revert to Follower after timeout")
 }
+
+// TestRequestVote_GrantsVote 测试在所有条件都满足时，节点会正确地投出赞成票。
+func TestRequestVote_GrantsVote(t *testing.T) {
+	// --- Arrange ---
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockStore := storage.NewMockStorage(ctrl)
+
+	r := &Raft{
+		id:          2,
+		currentTerm: 5,
+		votedFor:    -1, // 尚未投票
+		store:       mockStore,
+		mu:          sync.Mutex{},
+	}
+	args := param.NewRequestVoteArgs(5, 1, uint64(10), 5)
+	reply := &param.RequestVoteReply{}
+
+	// --- 设置 Mock 期望 ---
+	// 期望 isLogUpToDate 会检查本地日志
+	mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil)
+	mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil)
+	// 期望 grantVote 会持久化投票结果
+	mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 5, VotedFor: 1}).Return(nil)
+
+	// --- Act ---
+	err := r.RequestVote(args, reply)
+
+	// --- Assert ---
+	assert.NoError(t, err, "RequestVote should not return error")
+	assert.True(t, reply.VoteGranted, "expected vote to be granted")
+}
+
+// TestRequestVote_RejectsForStaleTerm 测试当候选人任期落后时，节点会拒绝投票。
+func TestRequestVote_RejectsForStaleTerm(t *testing.T) {
+	// Arrange
+	r := &Raft{currentTerm: 6, mu: sync.Mutex{}}
+	args := &param.RequestVoteArgs{Term: 5} // 候选人任期为 5，落后于本地的 6
+	reply := &param.RequestVoteReply{}
+
+	// Act
+	err := r.RequestVote(args, reply)
+
+	// Assert
+	assert.NoError(t, err, "RequestVote should not return error")
+	assert.False(t, reply.VoteGranted, "expected vote to be denied for stale term")
+	assert.Equal(t, uint64(6), reply.Term, "reply term should be 6")
+}
+
+// TestRequestVote_RejectsForStaleLog 测试当候选人日志落后时，节点会拒绝投票。
+func TestRequestVote_RejectsForStaleLog(t *testing.T) {
+	// --- Arrange ---
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockStore := storage.NewMockStorage(ctrl)
+
+	r := &Raft{
+		id:          2,
+		currentTerm: 5,
+		votedFor:    -1, // 尚未投票
+		store:       mockStore,
+		mu:          sync.Mutex{},
+	}
+	// 候选人日志只到索引 9，任期 5
+	args := param.NewRequestVoteArgs(5, 1, uint64(9), 5)
+	reply := &param.RequestVoteReply{}
+
+	// --- 设置 Mock 期望 ---
+	// 期望 isLogUpToDate 会检查本地日志，我们让本地日志更新（索引 10，任期 5）
+	mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil)
+	mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil)
+
+	// --- Act ---
+	err := r.RequestVote(args, reply)
+
+	// --- Assert ---
+	assert.NoError(t, err, "RequestVote should not return error")
+	assert.False(t, reply.VoteGranted, "expected vote to be denied for stale log")
+}
+
+// TestRequestVote_StepsDownOnHigherTerm 测试当候选人任期更高时，节点会先转为 Follower 再投票。
+func TestRequestVote_StepsDownOnHigherTerm(t *testing.T) {
+	// --- Arrange ---
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockStore := storage.NewMockStorage(ctrl)
+
+	r := &Raft{id: 2, currentTerm: 5, store: mockStore, mu: sync.Mutex{}}
+	args := param.NewRequestVoteArgs(6, 1, uint64(10), 5)
+	reply := &param.RequestVoteReply{}
+
+	// --- 设置 Mock 期望 ---
+	gomock.InOrder(
+		// 期望1: becomeFollower 会持久化新状态 (任期6, votedFor: -1)
+		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: math.MaxUint64}).Return(nil),
+		// 期望2: isLogUpToDate 检查日志（假设通过）
+		mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil),
+		mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil),
+		// 期望3: grantVote 会持久化投票结果 (任期6, votedFor: 1)
+		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: 1}).Return(nil),
+	)
+
+	// --- Act ---
+	err := r.RequestVote(args, reply)
+
+	// --- Assert ---
+	assert.NoError(t, err, "RequestVote should not return error")
+	assert.True(t, reply.VoteGranted, "expected vote to be granted after stepping down")
+	assert.Equal(t, uint64(6), r.currentTerm, "term should be updated to 6")
+}
