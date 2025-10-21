@@ -268,3 +268,47 @@ func TestRequestVote_StepsDownOnHigherTerm(t *testing.T) {
 	assert.True(t, reply.VoteGranted, "expected vote to be granted after stepping down")
 	assert.Equal(t, uint64(6), r.currentTerm, "term should be updated to 6")
 }
+
+func TestStartElection_StepsDownOnAppendEntries(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockStore := storage.NewMockStorage(ctrl)
+	mockTrans := transport.NewMockTransport(ctrl)
+	peerIds := []int{2, 3}
+
+	// 期望初始化调用
+	mockStore.EXPECT().GetState().Return(param.HardState{CurrentTerm: 5}, nil).Times(1)
+	r := NewRaft(1, peerIds, mockStore, nil, mockTrans, nil)
+	r.state = param.Follower
+
+	// 模拟选举开始
+	gomock.InOrder(
+		// 成为 Candidate，持久化状态
+		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: 1}).Return(nil),
+		// 获取日志信息
+		mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil),
+		mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil),
+	)
+	// 期望发出投票请求 (允许任意次数，因为可能在收到 AE 前发出)
+	mockTrans.EXPECT().SendRequestVote(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	// 启动选举过程
+	go r.startElection()
+	time.Sleep(5 * time.Millisecond) // 等待选举协程启动
+
+	// 模拟收到来自更高任期 Leader 的 AppendEntries
+	argsAE := &param.AppendEntriesArgs{Term: 7, LeaderId: 2} // 任期为 7
+	replyAE := &param.AppendEntriesReply{}
+	// 期望收到 AE 后，调用 becomeFollower 持久化新状态
+	mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 7, VotedFor: math.MaxUint64}).Return(nil)
+
+	err := r.AppendEntries(argsAE, replyAE)
+	assert.NoError(t, err)
+
+	// 验证状态
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	assert.Equal(t, param.Follower, r.state, "State should revert to Follower")
+	assert.Equal(t, uint64(7), r.currentTerm, "Term should be updated to 7")
+}
