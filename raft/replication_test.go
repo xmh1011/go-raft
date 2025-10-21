@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"math"
 	"strconv"
 	"sync"
 	"testing"
@@ -328,4 +329,131 @@ func TestDispatchEntries(t *testing.T) {
 		assert.True(t, r.inJointConsensus, "should enter joint consensus")
 		assert.Equal(t, cmd.NewPeerIDs, r.newPeerIds)
 	})
+}
+
+// TestProcessAppendEntriesReply_StepsDownOnHigherTerm 测试 Leader 在处理 AppendEntries 响应时
+// 发现更高任期，应立即转为 Follower。
+func TestProcessAppendEntriesReply_StepsDownOnHigherTerm(t *testing.T) {
+	// --- Arrange ---
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockStore := storage.NewMockStorage(ctrl)
+	// 期望初始化调用 GetState
+	mockStore.EXPECT().GetState().Return(param.HardState{CurrentTerm: 5}, nil).Times(1)
+	// 期望调用 SetState 持久化 Follower 状态
+	mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: math.MaxUint64}).Return(nil).Times(1)
+
+	r := NewRaft(1, []int{2}, mockStore, nil, nil, nil)
+	r.state = param.Leader
+	r.currentTerm = 5
+	peerId := 2
+
+	// 模拟一个来自 Peer 的、包含更高任期的响应
+	args := &param.AppendEntriesArgs{Term: 5} // Leader 发送请求时的任期
+	reply := &param.AppendEntriesReply{
+		Term:    6, // Follower 返回了更高的任期
+		Success: false,
+	}
+	savedCurrentTerm := uint64(5) // 模拟调用 replicateLogsToPeer 时的任期
+
+	// --- Act ---
+	r.mu.Lock()
+	r.processAppendEntriesReply(peerId, args, reply, savedCurrentTerm)
+	r.mu.Unlock()
+
+	// --- Assert ---
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	assert.Equal(t, param.Follower, r.state, "State should become Follower")
+	assert.Equal(t, uint64(6), r.currentTerm, "Term should be updated to 6")
+	assert.Equal(t, -1, r.votedFor, "VotedFor should be reset")
+}
+
+// TestAppendEntries_FollowerLogConflict_LongerLog 测试 Follower 日志在 PrevLogIndex 之后
+// 与 Leader 不一致（例如 Follower 日志更长）的情况。
+func TestAppendEntries_FollowerLogConflict_LongerLog(t *testing.T) {
+	// --- Arrange ---
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockStore := storage.NewMockStorage(ctrl)
+
+	r := &Raft{
+		id:          2,
+		currentTerm: 5,
+		store:       mockStore,
+		mu:          sync.Mutex{},
+	}
+
+	// Leader 发来的请求：期望 Follower 在索引 10 处有任期 5 的日志，并追加索引 11 的日志
+	args := &param.AppendEntriesArgs{
+		Term:         5,
+		LeaderId:     1,
+		PrevLogIndex: 10,
+		PrevLogTerm:  5,
+		Entries:      []param.LogEntry{{Command: "cmd11", Term: 5, Index: 11}},
+	}
+	reply := &param.AppendEntriesReply{}
+
+	// --- 设置 Mock 期望 ---
+	gomock.InOrder(
+		// 1. 检查 PrevLogIndex(10) 处的日志 -> 假设匹配成功
+		mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil),
+		// 2. 在 appendAndStoreEntries 中，会尝试截断从 PrevLogIndex+1 (即 11) 开始的日志
+		mockStore.EXPECT().TruncateLog(uint64(11)).Return(nil),
+		// 3. 然后尝试追加新的日志条目
+		mockStore.EXPECT().AppendEntries(args.Entries).Return(nil),
+		// 4. (如果需要更新 commitIndex) 可能会调用 LastLogIndex
+		mockStore.EXPECT().LastLogIndex().Return(uint64(11), nil).AnyTimes(), // 允许任意次调用
+	)
+
+	// --- Act ---
+	err := r.AppendEntries(args, reply)
+
+	// --- Assert ---
+	assert.NoError(t, err, "AppendEntries should not return error")
+	assert.True(t, reply.Success, "Expected AppendEntries to succeed")
+	// 这里可以进一步断言 r.commitIndex (如果 args.LeaderCommit > r.commitIndex)
+}
+
+// TestAppendEntries_FollowerLogConflict_TermMismatch 测试 Follower 在 PrevLogIndex 处的任期
+// 与 Leader 的 PrevLogTerm 不匹配的情况。
+func TestAppendEntries_FollowerLogConflict_TermMismatch(t *testing.T) {
+	// --- Arrange ---
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockStore := storage.NewMockStorage(ctrl)
+
+	r := &Raft{
+		id:          2,
+		currentTerm: 5,
+		store:       mockStore,
+		mu:          sync.Mutex{},
+	}
+
+	// Leader 发来的请求：期望 Follower 在索引 10 处有任期 4 的日志
+	args := &param.AppendEntriesArgs{
+		Term:         5,
+		LeaderId:     1,
+		PrevLogIndex: 10,
+		PrevLogTerm:  4, // Leader 认为应该是任期 4
+		Entries:      []param.LogEntry{{Command: "cmd11", Term: 5, Index: 11}},
+	}
+	reply := &param.AppendEntriesReply{}
+
+	// --- 设置 Mock 期望 ---
+	// 期望 GetEntry(10) 返回一个任期为 5 的日志，与 Leader 的期望(4)冲突
+	followerEntryAtIndex10 := &param.LogEntry{Term: 5, Index: 10}
+	mockStore.EXPECT().GetEntry(uint64(10)).Return(followerEntryAtIndex10, nil).Times(1)
+	// 期望在 checkLogConsistency 中，当发现任期不匹配时，不再进行后续操作 (如 TruncateLog, AppendEntries)
+
+	// --- Act ---
+	err := r.AppendEntries(args, reply)
+
+	// --- Assert ---
+	assert.NoError(t, err, "AppendEntries should not return error")
+	assert.False(t, reply.Success, "Expected AppendEntries to fail due to term mismatch")
+	assert.Equal(t, uint64(5), reply.Term, "Reply term should be follower's current term")
+	assert.Equal(t, followerEntryAtIndex10.Term, reply.ConflictTerm, "ConflictTerm should be the follower's term at the conflict index")
+	assert.Equal(t, args.PrevLogIndex, reply.ConflictIndex, "ConflictIndex should be PrevLogIndex")
 }

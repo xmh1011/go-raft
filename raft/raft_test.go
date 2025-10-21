@@ -235,7 +235,7 @@ func TestClientRequest_DuplicateRequest(t *testing.T) {
 	// --- Arrange ---
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
-	mockStore := storage.NewMockStorage(ctrl) // 虽然不期望调用，但需要一个实例
+	mockStore := storage.NewMockStorage(ctrl)
 
 	r := &Raft{
 		id:    1,
@@ -255,4 +255,34 @@ func TestClientRequest_DuplicateRequest(t *testing.T) {
 
 	// --- Assert ---
 	assert.True(t, reply.Success, "expected Success to be true for duplicate request")
+}
+
+// TestWaitForAppliedLog_Timeout 测试 waitForAppliedLog 函数的超时逻辑
+func TestWaitForAppliedLog_Timeout(t *testing.T) {
+	// --- Arrange ---
+	r := &Raft{
+		notifyApply: make(map[uint64]chan any),
+		mu:          sync.Mutex{},
+	}
+	testIndex := uint64(10)
+	testTimeout := 50 * time.Millisecond // 设置一个较短的超时时间用于测试
+
+	// --- Act ---
+	// 调用 waitForAppliedLog，但不向对应的 channel 发送任何通知
+	startTime := time.Now()
+	result, ok := r.waitForAppliedLog(testIndex, testTimeout)
+	duration := time.Since(startTime)
+
+	// --- Assert ---
+	assert.False(t, ok, "Expected waitForAppliedLog to return false on timeout")
+	assert.Nil(t, result, "Expected result to be nil on timeout")
+	// 验证实际等待时间约等于我们设置的超时时间
+	assert.GreaterOrEqual(t, duration, testTimeout, "Duration should be at least the timeout")
+	assert.Less(t, duration, testTimeout*2, "Duration should not be excessively longer than the timeout") // 允许一些误差
+
+	// 验证超时的 channel 是否已从 map 中移除，防止内存泄漏
+	r.mu.Lock()
+	_, exists := r.notifyApply[testIndex]
+	r.mu.Unlock()
+	assert.False(t, exists, "Notify channel for timed out index should be removed from the map")
 }
