@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"errors"
 	"log"
 	"strconv"
 	"time"
@@ -109,6 +110,14 @@ func (r *Raft) RequestVote(args *param.RequestVoteArgs, reply *param.RequestVote
 // initializeCandidateState 负责将节点状态转换为 Candidate，更新任期，投票给自己，并持久化这些变更。
 // 这是成为候选人的第一步，且必须是原子性的。
 func (r *Raft) initializeCandidateState() error {
+	// 如果我们不是 Follower 或 Candidate（例如，Stop() 被调用且状态为 Dead），
+	// 则中止选举，防止 Goroutine 泄露。
+	if r.state != param.Follower && r.state != param.Candidate {
+		log.Printf("[Election] Node %d aborting election start; state is %s", r.id, r.state)
+		// 返回一个错误，以便 startElection 协程能安全退出
+		return errors.New("cannot start election in non-follower/candidate state")
+	}
+
 	// 将状态更新为 Candidate，增加当前任期号，并给自己投票。
 	r.state = param.Candidate
 	r.currentTerm++
@@ -184,6 +193,10 @@ func (r *Raft) handleElectionResult(voteChan <-chan *param.VoteResult, electionT
 	// 3. 循环等待，直到选举获胜或超时。
 	for {
 		select {
+		case <-r.shutdownChan:
+			log.Printf("[Election] Node %d shutting down election for term %d", r.id, electionTerm)
+			return // 收到停止信号，退出协程
+
 		case result := <-voteChan:
 			// 处理收到的投票。如果计票结果显示选举获胜，则转换状态并结束。
 			if r.processVote(ctx, result, electionTerm) { //

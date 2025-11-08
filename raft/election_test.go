@@ -23,13 +23,13 @@ func TestStartElection_WinsElection(t *testing.T) {
 	mockStore := storage.NewMockStorage(ctrl)
 	mockTrans := transport.NewMockTransport(ctrl)
 	peerIds := []int{2, 3}
-
-	// This test will involve applying logs after commit, so we need a mock state machine.
 	mockSM := storage.NewMockStateMachine(ctrl)
 
 	mockStore.EXPECT().GetState().Return(param.HardState{}, nil).Times(1)
-	// IMPORTANT: Pass the mockSM to the constructor.
-	r := NewRaft(1, peerIds, mockStore, mockSM, mockTrans, nil)
+	commitChan := make(chan param.CommitEntry, 10)
+	r := NewRaft(1, peerIds, mockStore, mockSM, mockTrans, commitChan)
+	defer r.Stop()
+
 	r.state = param.Follower
 	r.currentTerm = 5
 
@@ -40,14 +40,19 @@ func TestStartElection_WinsElection(t *testing.T) {
 		mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil),
 	)
 
-	for _, peerId := range peerIds {
-		mockTrans.EXPECT().SendRequestVote(strconv.Itoa(peerId), gomock.Any(), gomock.Any()).
-			DoAndReturn(func(id string, args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
-				reply.Term = args.Term
-				reply.VoteGranted = true
-				return nil
-			})
-	}
+	mockTrans.EXPECT().SendRequestVote(strconv.Itoa(2), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(id string, args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
+			reply.Term = args.Term
+			reply.VoteGranted = true
+			return nil
+		}).AnyTimes()
+
+	mockTrans.EXPECT().SendRequestVote(strconv.Itoa(3), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(id string, args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
+			reply.Term = args.Term
+			reply.VoteGranted = true
+			return nil
+		}).AnyTimes()
 
 	// Mock for initLeaderState
 	mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil)
@@ -71,10 +76,6 @@ func TestStartElection_WinsElection(t *testing.T) {
 			}
 			return nil
 		}).AnyTimes()
-
-	// --- Act ---
-	// Manually trigger the functions, but intercept the call to startHeartbeat
-	// This replaces the single r.startElection() call with a more controlled sequence.
 
 	// 1. Initialize candidate state
 	r.mu.Lock()
@@ -104,10 +105,8 @@ func TestStartElection_WinsElection(t *testing.T) {
 	r.broadcastHeartbeat()
 	r.mu.Unlock()
 
-	// --- Assert ---
 	// Wait for the single, manually triggered heartbeat to complete.
 	wg.Wait()
-	// The test now finishes cleanly with no goroutines left behind.
 }
 
 // TestStartElection_LosesElection tests a candidate failing to win an election.
@@ -125,9 +124,6 @@ func TestStartElection_LosesElection(t *testing.T) {
 	r.state = param.Follower
 	r.currentTerm = 5
 
-	// Fix: Add a call to becomeFollower which persists the state change.
-	// This requires adding the bug fix to your election.go source code.
-	// Assuming the fix is in place, the test is as follows:
 	gomock.InOrder(
 		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: 1}).Return(nil),
 		mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil),
@@ -298,7 +294,7 @@ func TestStartElection_StepsDownOnAppendEntries(t *testing.T) {
 	time.Sleep(5 * time.Millisecond) // 等待选举协程启动
 
 	// 模拟收到来自更高任期 Leader 的 AppendEntries
-	argsAE := &param.AppendEntriesArgs{Term: 7, LeaderId: 2} // 任期为 7
+	argsAE := &param.AppendEntriesArgs{Term: 7, LeaderId: 2, PrevLogIndex: 0} // 任期为 7, PrevLogIndex: 0
 	replyAE := &param.AppendEntriesReply{}
 	// 期望收到 AE 后，调用 becomeFollower 持久化新状态
 	mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 7, VotedFor: math.MaxUint64}).Return(nil)

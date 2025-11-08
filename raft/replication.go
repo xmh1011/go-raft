@@ -148,6 +148,11 @@ func (r *Raft) processAppendEntriesReply(peerId int, args *param.AppendEntriesAr
 	}
 
 	if r.state == param.Leader {
+		// 无论 Success 是 true 还是 false，
+		// 只要任期匹配，就说明 Follower 确认了我们的 Leader 地位。
+		// 这足以用于 ReadIndex 的租约。
+		r.lastAck[peerId] = time.Now()
+
 		if reply.Success {
 			r.handleSuccessfulAppendEntries(peerId, args)
 		} else {
@@ -318,6 +323,9 @@ func (r *Raft) handleTermAndHeartbeat(args *param.AppendEntriesArgs, reply *para
 	// 只要收到了来自当前（或更新后的）合法 Leader 的消息，就重置选举计时器。
 	// 这表明 Leader 仍然活跃，Follower 不需要发起新的选举。
 	r.electionResetEvent = time.Now()
+
+	// 重置下一次的随机超时
+	r.currentElectionTimeout = r.randomizedElectionTimeout()
 	return true
 }
 
@@ -432,6 +440,9 @@ func (r *Raft) fetchEntriesToApply() ([]param.LogEntry, uint64) {
 	// 如果成功获取了日志，则原子性地更新 lastApplied 索引。
 	if len(entries) > 0 {
 		r.lastApplied = entries[len(entries)-1].Index
+		// 唤醒所有在 handleLinearizableRead 中
+		// 等待 lastApplied 追赶的 goroutine。
+		r.lastAppliedCond.Broadcast()
 	}
 
 	return entries, lastAppliedBeforeUpdate

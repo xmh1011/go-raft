@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -275,4 +276,43 @@ func TestSendSnapshot_StepsDownOnHigherTerm(t *testing.T) {
 	defer r.mu.Unlock()
 	assert.Equal(t, param.Follower, r.state, "state should become Follower")
 	assert.Equal(t, uint64(6), r.currentTerm, "term should become 6")
+}
+
+// TestProcessSnapshotReply_UpdatesLastAck 测试 Leader 在处理快照响应时更新 lastAck
+func TestProcessSnapshotReply_UpdatesLastAck(t *testing.T) {
+	peerId := 2
+	savedTerm := uint64(5)
+	snapshotIndex := uint64(100)
+
+	// --- 变更开始 ---
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockStore := storage.NewMockStorage(ctrl)
+	mockTrans := transport.NewMockTransport(ctrl)
+
+	// 期望 NewRaft 内部的 GetState 调用
+	mockStore.EXPECT().GetState().Return(param.HardState{}, nil).Times(1)
+	// 确保 commitChan 被初始化
+	commitChan := make(chan param.CommitEntry, 1)
+
+	r := NewRaft(1, []int{peerId}, mockStore, nil, mockTrans, commitChan)
+	r.state = param.Leader
+	r.currentTerm = savedTerm
+	// --- 变更结束 ---
+
+	pastTime := time.Now().Add(-1 * time.Second)
+	r.lastAck[peerId] = pastTime
+
+	// 模拟一个成功的响应
+	reply := &param.InstallSnapshotReply{Term: savedTerm}
+
+	r.processSnapshotReply(peerId, reply, snapshotIndex, savedTerm)
+
+	// 为了安全地断言，我们在这里重新获取锁
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	assert.True(t, r.lastAck[peerId].After(pastTime), "lastAck should be updated on successful snapshot reply")
+	// 同时验证它是否也正确更新了 nextIndex/matchIndex
+	assert.Equal(t, snapshotIndex+1, r.nextIndex[peerId])
+	assert.Equal(t, snapshotIndex, r.matchIndex[peerId])
 }
