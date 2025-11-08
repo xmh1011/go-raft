@@ -1,7 +1,9 @@
 package raft
 
 import (
+	"encoding/json"
 	"log"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -36,24 +38,30 @@ type Raft struct {
 	state       param.State
 
 	// --- 日志与状态机相关 ---
-	commitIndex uint64
-	lastApplied uint64
-	commitChan  chan<- param.CommitEntry
+	commitIndex     uint64
+	lastApplied     uint64
+	commitChan      chan<- param.CommitEntry
+	lastAppliedCond *sync.Cond // 用于等待 lastApplied 赶上 commitIndex
 
 	// --- 快照相关 ---
 	// snapshot 在内存中持有当前最新的快照，避免频繁从存储中读取
 	snapshot *param.Snapshot
 
 	// --- 选举相关 ---
-	electionResetEvent time.Time
+	electionResetEvent     time.Time
+	currentElectionTimeout time.Duration // 当前节点的随机选举超时
 
 	// --- Leader 的易失性状态 ---
 	nextIndex  map[int]uint64
 	matchIndex map[int]uint64
+	lastAck    map[int]time.Time // 跟踪 Leader 收到的每个 peer 的最后 ACK 时间
 
 	// --- 客户端交互状态 ---
 	clientSessions map[int64]int64
 	notifyApply    map[uint64]chan any
+
+	// --- 内部控制 ---
+	shutdownChan chan struct{} // 用于关闭 Run 循环
 }
 
 // NewRaft 创建一个新的 Raft 节点。
@@ -73,6 +81,8 @@ func NewRaft(id int, peerIds []int, store storage.Storage, stateMachine storage.
 		matchIndex:       make(map[int]uint64),
 		clientSessions:   make(map[int64]int64),
 		notifyApply:      make(map[uint64]chan any),
+		shutdownChan:     make(chan struct{}),
+		lastAck:          make(map[int]time.Time),
 	}
 	// 从稳定存储中恢复状态。
 	if store != nil {
@@ -85,13 +95,164 @@ func NewRaft(id int, peerIds []int, store storage.Storage, stateMachine storage.
 	}
 
 	r.electionResetEvent = time.Now()
+	r.currentElectionTimeout = r.randomizedElectionTimeout()
+	r.lastAppliedCond = sync.NewCond(&r.mu)
 
 	return r
+}
+
+// Run 启动 Raft 节点的主循环。
+// 它会Ticking，检查选举超时，并在 Follower/Candidate 状态下发起选举。
+func (r *Raft) Run() {
+	log.Printf("[Core] Node %d starting main loop (Initial timeout: %s)", r.id, r.currentElectionTimeout)
+	ticker := time.NewTicker(heartbeatInterval) // 使用心跳间隔作为 tick 频率
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.shutdownChan:
+			log.Printf("[Core] Node %d shutting down main loop.", r.id)
+			return
+
+		case <-ticker.C:
+			r.mu.Lock()
+
+			// 只有 Follower 和 Candidate 状态才需要检查选举超时。
+			// Leader 和 Dead 状态都应该忽略 ticker。
+			// (Dead 状态最终会被 shutdownChan 捕获，但在这里检查
+			// 可以防止 Stop() 和 ticker 之间的竞态条件)
+			if r.state != param.Follower && r.state != param.Candidate {
+				r.mu.Unlock()
+				continue
+			}
+
+			if time.Since(r.electionResetEvent) > r.currentElectionTimeout {
+				log.Printf("[Core] Node %d election timeout reached (timeout: %s), starting election.", r.id, r.currentElectionTimeout)
+				r.currentElectionTimeout = r.randomizedElectionTimeout()
+
+				r.mu.Unlock() // startElection 会自己加锁
+				// 选举必须在 goroutine 中启动，
+				// 否则会阻塞 Run() 循环，导致 Stop() 无法停止此循环。
+				go r.startElection()
+			} else {
+				r.mu.Unlock()
+			}
+		}
+	}
+}
+
+// Stop 停止 Raft 节点的主循环。
+func (r *Raft) Stop() {
+	r.mu.Lock()
+	// 检查是否已经关闭
+	if r.state == param.Dead {
+		r.mu.Unlock()
+		return
+	}
+
+	log.Printf("[Core] Node %d received stop signal.", r.id)
+	r.state = param.Dead
+	close(r.shutdownChan)
+	r.mu.Unlock()
+}
+
+// randomizedElectionTimeout 返回一个在 [electionTimeout, 2 * electionTimeout) 范围内的随机超时时间。
+// 这有助于防止选举时出现平票（split votes）。
+func (r *Raft) randomizedElectionTimeout() time.Duration {
+	randomRange := int64(electionTimeout)
+	randomAddition := time.Duration(rand.Int63n(randomRange))
+	return electionTimeout + randomAddition
 }
 
 // ClientRequest 是处理来自客户端请求的 RPC 函数。
 // 它负责协调三个主要阶段：前置检查、提交并等待、处理最终结果。
 func (r *Raft) ClientRequest(args *param.ClientArgs, reply *param.ClientReply) error {
+	// 尝试将命令解析为 KVCommand 来检查它是否为只读
+	var cmd param.KVCommand
+	isRead := false
+
+	if cmdBytes, ok := args.Command.([]byte); ok {
+		if err := json.Unmarshal(cmdBytes, &cmd); err == nil {
+			if cmd.Op == "get" {
+				isRead = true
+			}
+		}
+	}
+
+	if isRead {
+		// 6. 处理线性一致性读
+		return r.handleLinearizableRead(cmd, reply)
+	}
+
+	// 7. 处理写请求（这是以前的逻辑）
+	return r.handleWriteRequest(args, reply)
+}
+
+// 8. 新增：handleLinearizableRead
+// handleLinearizableRead 处理只读请求，使用 ReadIndex 机制。
+func (r *Raft) handleLinearizableRead(cmd param.KVCommand, reply *param.ClientReply) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// 1. 检查是否为 Leader
+	if r.state != param.Leader {
+		reply.NotLeader = true
+		reply.LeaderHint = r.knownLeaderID
+		return nil
+	}
+
+	// 2. 检查领导权租约 (Lease Check)
+	// 计算在选举超时内响应的节点数
+	ackCount := 1 // 1. Leader 总是为自己“响应”
+	majority := (len(r.peerIds)+1)/2 + 1
+
+	for _, peerId := range r.peerIds {
+		if time.Since(r.lastAck[peerId]) < electionTimeout {
+			ackCount++
+		}
+	}
+
+	// 如果 Leader 没有得到大多数节点的及时响应，
+	// 它不确定自己是否仍然是 Leader，因此拒绝读取。
+	if ackCount < majority {
+		reply.Success = false
+		reply.NotLeader = true // 告诉客户端重试
+		reply.LeaderHint = r.knownLeaderID
+		log.Printf("[ReadIndex] Node %d lease check failed (acks: %d/%d), rejecting read.", r.id, ackCount, majority)
+		return nil
+	}
+
+	// 3. 租约有效，记录 ReadIndex
+	readIndex := r.commitIndex
+	log.Printf("[ReadIndex] Node %d lease check passed. ReadIndex set to %d. Waiting for lastApplied (%d)...", r.id, readIndex, r.lastApplied)
+
+	// 4. 等待状态机追赶上 ReadIndex
+	// 我们必须等待，直到 lastApplied >= readIndex
+	for r.lastApplied < readIndex {
+		// r.mu 锁被持有，Wait() 会自动释放它，
+		// 并在被唤醒时（通过 Broadcast）重新获取它。
+		r.lastAppliedCond.Wait()
+	}
+
+	// 5. 执行本地读取
+	// 此时, r.lastApplied >= readIndex, 状态机保证是线性的
+	log.Printf("[ReadIndex] Node %d lastApplied (%d) reached ReadIndex (%d). Performing local read.", r.id, r.lastApplied, readIndex)
+
+	value, err := r.stateMachine.Get(cmd.Key)
+	if err != nil {
+		reply.Success = false
+		reply.Result = err.Error() // 例如 "key not found"
+	} else {
+		reply.Success = true
+		reply.Result = value
+	}
+
+	return nil
+}
+
+// 9. 新增：handleWriteRequest (从旧的 ClientRequest 逻辑中重构)
+// handleWriteRequest 处理写请求（通过 Raft 日志）。
+func (r *Raft) handleWriteRequest(args *param.ClientArgs, reply *param.ClientReply) error {
 	// 1. 执行前置检查。如果不是 Leader 或请求重复，则提前返回。
 	if proceed := r.preHandleClientRequest(args, reply); !proceed {
 		return nil
@@ -302,6 +463,11 @@ func (r *Raft) becomeFollower(newTerm uint64) error {
 	r.state = param.Follower
 	r.votedFor = -1 // 进入新任期时，重置投票记录。
 
+	// 每当我们成为 Follower（无论何种原因），
+	// 都应该重置选举计时器，并为下一次超时设置一个新的随机值。
+	r.electionResetEvent = time.Now()
+	r.currentElectionTimeout = r.randomizedElectionTimeout()
+
 	if err := r.store.SetState(param.HardState{CurrentTerm: r.currentTerm, VotedFor: uint64(r.votedFor)}); err != nil {
 		log.Printf("[ERROR] Node %d failed to persist state after becoming follower: %v", r.id, err)
 		return err
@@ -313,6 +479,16 @@ func (r *Raft) becomeFollower(newTerm uint64) error {
 // 它通过一个注册在 notifyApply 映射中的 channel 来实现同步等待。
 func (r *Raft) waitForAppliedLog(index uint64, timeout time.Duration) (any, bool) {
 	r.mu.Lock()
+
+	// 检查日志是否在“注册通知”之前就已经被应用了。
+	// 这是为了防止在 Commit 和 waitForAppliedLog 之间的
+	// 极短时间内，applyLogs 协程就已运行完毕导致的竞态。
+	if r.lastApplied >= index {
+		r.mu.Unlock()
+		// 日志已应用。对于写操作，我们通常返回 nil, true。
+		return nil, true
+	}
+
 	// 创建一个通知 channel，并注册到 map 中。
 	notifyChan := make(chan any, 1)
 	r.notifyApply[index] = notifyChan

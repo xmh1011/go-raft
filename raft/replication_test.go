@@ -69,6 +69,7 @@ func TestReplicateLogsToPeer_Success(t *testing.T) {
 	mockStore.EXPECT().GetState().Return(param.HardState{}, nil).Times(1)
 
 	r := NewRaft(1, []int{peerId}, mockStore, mockSM, mockTrans, commitChan)
+	defer r.Stop()
 	r.state = param.Leader
 	r.currentTerm = 5
 	r.commitIndex = 10
@@ -117,33 +118,49 @@ func TestReplicateLogsToPeer_FollowerRejects(t *testing.T) {
 
 	mockStore := storage.NewMockStorage(ctrl)
 	mockTrans := transport.NewMockTransport(ctrl)
+	mockSM := storage.NewMockStateMachine(ctrl)
 	peerId := 2
-
+	commitChan := make(chan param.CommitEntry, 1)
 	mockStore.EXPECT().GetState().Return(param.HardState{}, nil).Times(1)
-	r := NewRaft(1, []int{peerId}, mockStore, nil, mockTrans, nil)
+	r := NewRaft(1, []int{peerId}, mockStore, mockSM, mockTrans, commitChan)
+	defer r.Stop()
 	r.state = param.Leader
 	r.currentTerm = 5
 	r.nextIndex[peerId] = 11
 
 	mockStore.EXPECT().LastLogIndex().Return(uint64(11), nil).AnyTimes()
-	mockStore.EXPECT().GetEntry(gomock.Any()).Return(&param.LogEntry{Term: 5}, nil).AnyTimes()
-	mockStore.EXPECT().FirstLogIndex().Return(uint64(1), nil).AnyTimes()
-
-	mockTrans.EXPECT().SendAppendEntries(strconv.Itoa(peerId), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(id string, args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
-			reply.Term = 5
-			reply.Success = false
-			reply.ConflictIndex = 8
-			return nil
+	mockStore.EXPECT().GetEntry(gomock.Any()).
+		DoAndReturn(func(index uint64) (*param.LogEntry, error) {
+			return &param.LogEntry{Term: 5, Index: index}, nil
 		}).AnyTimes()
+	mockStore.EXPECT().FirstLogIndex().Return(uint64(1), nil).AnyTimes()
+	mockSM.EXPECT().Apply(gomock.Any()).Return(nil).AnyTimes()
+	gomock.InOrder(
+		// 第一次调用：失败并触发回退
+		mockTrans.EXPECT().SendAppendEntries(strconv.Itoa(peerId), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(id string, args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
+				reply.Term = 5
+				reply.Success = false
+				reply.ConflictIndex = 8
+				return nil
+			}).Times(1),
+
+		// 后续重试调用：成功，以终止 goroutine 循环
+		mockTrans.EXPECT().SendAppendEntries(strconv.Itoa(peerId), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(id string, args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
+				reply.Term = 5
+				reply.Success = true
+				return nil
+			}).AnyTimes(),
+	)
 
 	r.replicateLogsToPeer(peerId)
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond) // 等待后台 goroutine 完成
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	assert.Equal(t, uint64(8), r.nextIndex[peerId], "nextIndex should be backed off to 8")
+	assert.Equal(t, uint64(12), r.nextIndex[peerId], "nextIndex should be 12 after successful retry")
 }
 
 // TestAppendEntries_FollowerLogic 测试 Follower 节点处理 AppendEntries RPC 的核心逻辑
@@ -188,6 +205,7 @@ func TestAppendEntries_FollowerLogic(t *testing.T) {
 			stateMachine: mockSM, // 确保 stateMachine 不为 nil
 			lastApplied:  10,     // 设置正确的 lastApplied 初始值
 		}
+		r.lastAppliedCond = sync.NewCond(&r.mu)
 
 		newEntries := []param.LogEntry{{Command: "cmd1", Term: 5, Index: 11}}
 		args := &param.AppendEntriesArgs{
@@ -302,10 +320,11 @@ func TestDispatchEntries(t *testing.T) {
 			notifyApply:  map[uint64]chan any{10: notifyChan},
 			mu:           sync.Mutex{},
 		}
+		r.lastAppliedCond = sync.NewCond(&r.mu)
+
 		entry := param.LogEntry{Command: "test", Index: 10}
 
 		mockSM.EXPECT().Apply(entry).Return("test_result")
-		// 模拟 commitChan, 因为 applyStateMachineCommand 是一个空接口，所以我们在这里不检查
 		r.commitChan = make(chan param.CommitEntry, 1)
 
 		r.dispatchEntries([]param.LogEntry{entry})
@@ -321,6 +340,8 @@ func TestDispatchEntries(t *testing.T) {
 	// 场景2: 应用配置变更命令（进入联合共识）
 	t.Run("Apply config change to enter joint consensus", func(t *testing.T) {
 		r := &Raft{inJointConsensus: false, mu: sync.Mutex{}}
+		r.lastAppliedCond = sync.NewCond(&r.mu)
+
 		cmd := param.ConfigChangeCommand{NewPeerIDs: []int{1, 2, 3}}
 		entry := param.LogEntry{Command: cmd, Index: 10}
 
@@ -384,6 +405,7 @@ func TestAppendEntries_FollowerLogConflict_LongerLog(t *testing.T) {
 		store:       mockStore,
 		mu:          sync.Mutex{},
 	}
+	r.lastAppliedCond = sync.NewCond(&r.mu)
 
 	// Leader 发来的请求：期望 Follower 在索引 10 处有任期 5 的日志，并追加索引 11 的日志
 	args := &param.AppendEntriesArgs{
@@ -413,7 +435,6 @@ func TestAppendEntries_FollowerLogConflict_LongerLog(t *testing.T) {
 	// --- Assert ---
 	assert.NoError(t, err, "AppendEntries should not return error")
 	assert.True(t, reply.Success, "Expected AppendEntries to succeed")
-	// 这里可以进一步断言 r.commitIndex (如果 args.LeaderCommit > r.commitIndex)
 }
 
 // TestAppendEntries_FollowerLogConflict_TermMismatch 测试 Follower 在 PrevLogIndex 处的任期
@@ -456,4 +477,108 @@ func TestAppendEntries_FollowerLogConflict_TermMismatch(t *testing.T) {
 	assert.Equal(t, uint64(5), reply.Term, "Reply term should be follower's current term")
 	assert.Equal(t, followerEntryAtIndex10.Term, reply.ConflictTerm, "ConflictTerm should be the follower's term at the conflict index")
 	assert.Equal(t, args.PrevLogIndex, reply.ConflictIndex, "ConflictIndex should be PrevLogIndex")
+}
+
+// TestProcessAppendEntriesReply_UpdatesLastAck 测试 Leader 在处理响应时更新 lastAck
+func TestProcessAppendEntriesReply_UpdatesLastAck(t *testing.T) {
+	peerId := 2
+	savedTerm := uint64(5)
+
+	// 场景 1: 成功的响应
+	t.Run("OnSuccess", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+		mockStore := storage.NewMockStorage(ctrl)
+		// --- 修复：添加 mockSM 和 mockTrans ---
+		mockSM := storage.NewMockStateMachine(ctrl)
+		mockTrans := transport.NewMockTransport(ctrl)
+
+		mockStore.EXPECT().GetEntry(gomock.Any()).Return(&param.LogEntry{Term: 5}, nil).AnyTimes()
+		mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil).AnyTimes()
+		mockSM.EXPECT().Apply(gomock.Any()).Return(nil).AnyTimes()
+		mockStore.EXPECT().GetState().Return(param.HardState{}, nil).Times(1)
+		commitChan := make(chan param.CommitEntry, 1)
+		r := NewRaft(1, []int{peerId}, mockStore, mockSM, mockTrans, commitChan)
+		defer r.Stop()
+		r.state = param.Leader
+		r.currentTerm = savedTerm
+
+		pastTime := time.Now().Add(-1 * time.Second)
+		r.lastAck[peerId] = pastTime
+
+		reply := &param.AppendEntriesReply{Term: savedTerm, Success: true}
+		args := &param.AppendEntriesArgs{PrevLogIndex: 9, Entries: []param.LogEntry{{Index: 10}}}
+
+		r.mu.Lock()
+		r.processAppendEntriesReply(peerId, args, reply, savedTerm)
+		r.mu.Unlock()
+
+		assert.True(t, r.lastAck[peerId].After(pastTime), "lastAck should be updated on success")
+		r.mu.Lock()
+		assert.Equal(t, uint64(11), r.nextIndex[peerId], "nextIndex should be updated on success")
+		assert.Equal(t, uint64(10), r.matchIndex[peerId], "matchIndex should be updated on success")
+		r.mu.Unlock() // 释放锁，以便后台goroutine可以运行
+	})
+
+	// 场景 2: 失败但任期匹配的响应 (这也是一个 ACK)
+	t.Run("OnFailureMatchingTerm", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+		mockStore := storage.NewMockStorage(ctrl)
+		mockSM := storage.NewMockStateMachine(ctrl)
+		mockTrans := transport.NewMockTransport(ctrl)
+
+		mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil).AnyTimes()
+		mockStore.EXPECT().FirstLogIndex().Return(uint64(1), nil).AnyTimes()
+		mockStore.EXPECT().GetEntry(gomock.Any()).Return(&param.LogEntry{Term: 5}, nil).AnyTimes()
+		mockTrans.EXPECT().SendAppendEntries(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+		mockStore.EXPECT().GetState().Return(param.HardState{}, nil).Times(1)
+		commitChan := make(chan param.CommitEntry, 1)
+		r := NewRaft(1, []int{peerId}, mockStore, mockSM, mockTrans, commitChan)
+		defer r.Stop()
+		r.state = param.Leader
+		r.currentTerm = savedTerm
+
+		pastTime := time.Now().Add(-1 * time.Second)
+		r.lastAck[peerId] = pastTime
+
+		reply := &param.AppendEntriesReply{Term: savedTerm, Success: false} // 失败
+		args := &param.AppendEntriesArgs{}
+
+		r.mu.Lock()
+		r.processAppendEntriesReply(peerId, args, reply, savedTerm)
+		r.mu.Unlock()
+
+		assert.True(t, r.lastAck[peerId].After(pastTime), "lastAck should be updated even on failure if term matches")
+	})
+
+	// 场景 3: 更高任期的响应 (此部分已正确，因为它调用了 NewRaft)
+	t.Run("OnHigherTerm", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+		mockStore := storage.NewMockStorage(ctrl)
+		mockStore.EXPECT().GetState().Return(param.HardState{}, nil).Times(1)
+		mockStore.EXPECT().SetState(gomock.Any()).Return(nil).Times(1)
+
+		// --- 修复：确保 NewRaft 传入 non-nil transport ---
+		mockTrans := transport.NewMockTransport(ctrl)
+		r := NewRaft(1, []int{peerId}, mockStore, nil, mockTrans, nil)
+		defer r.Stop()
+		r.state = param.Leader
+		r.currentTerm = savedTerm
+		pastTime := time.Now().Add(-1 * time.Second)
+		r.lastAck[peerId] = pastTime
+
+		reply := &param.AppendEntriesReply{Term: savedTerm + 1, Success: false} // 更高任期
+		args := &param.AppendEntriesArgs{}
+
+		r.mu.Lock()
+		r.processAppendEntriesReply(peerId, args, reply, savedTerm)
+		r.mu.Unlock()
+
+		assert.False(t, r.lastAck[peerId].After(pastTime), "lastAck should NOT be updated on higher term")
+		r.mu.Lock() // 重新获取锁以检查状态
+		assert.Equal(t, param.Follower, r.state, "Should have stepped down to Follower")
+		r.mu.Unlock()
+	})
 }

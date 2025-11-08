@@ -9,7 +9,7 @@ BINARY_NAME=go-raft
 
 # --- Targets ---
 
-.PHONY: all deps test cover clean help
+.PHONY: all deps test cover install-mockgen mockgen clean help
 
 .DEFAULT_GOAL := help
 
@@ -37,6 +37,14 @@ test: deps
 cover: test
 	@echo " opening coverage report..."
 	@go tool cover -html=coverage.txt
+
+install-mockgen:
+	@echo "Installing mockgen..."
+	@command -v mockgen >/dev/null 2>&1 || go install github.com/golang/mock/mockgen@latest
+
+mockgen:
+	mockgen -source=storage/storage.go -destination=storage/storage_mock.go -package=storage
+	mockgen -source=transport/transport.go -destination=transport/transport_mock.go -package=transport
 
 ## clean: Remove generated files and clear Go test cache.
 clean:

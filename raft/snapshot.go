@@ -187,6 +187,9 @@ func (r *Raft) processSnapshotReply(peerId int, reply *param.InstallSnapshotRepl
 		return
 	}
 
+	// 成功的快照发送也是一个有效的 ACK
+	r.lastAck[peerId] = time.Now()
+
 	// 如果一切正常，说明快照已成功发送并被对方接收。
 	// 更新该 Follower 的 nextIndex 和 matchIndex，使其指向快照之后的第一个位置。
 	r.nextIndex[peerId] = snapshotLastIndex + 1
