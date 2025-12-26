@@ -103,6 +103,17 @@ func NewRaft(id int, peerIds []int, store storage.Storage, stateMachine storage.
 	return r
 }
 
+// ID 返回当前节点的 ID。
+func (r *Raft) ID() int {
+	return r.id
+}
+
+func (r *Raft) IsStopped() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state == param.Dead
+}
+
 // Run 启动 Raft 节点的主循环。
 // 它会Ticking，检查选举超时，并在 Follower/Candidate 状态下发起选举。
 func (r *Raft) Run() {
@@ -146,16 +157,18 @@ func (r *Raft) Run() {
 // Stop 停止 Raft 节点的主循环。
 func (r *Raft) Stop() {
 	r.mu.Lock()
-	// 检查是否已经关闭
-	if r.state == param.Dead {
-		r.mu.Unlock()
+	defer r.mu.Unlock()
+
+	select {
+	case <-r.shutdownChan:
+		// 已经关闭
 		return
+	default:
 	}
 
 	log.Printf("[Core] Node %d received stop signal.", r.id)
 	r.state = param.Dead
 	close(r.shutdownChan)
-	r.mu.Unlock()
 }
 
 // randomizedElectionTimeout 返回一个在 [electionTimeout, 2 * electionTimeout) 范围内的随机超时时间。
@@ -317,11 +330,10 @@ func (r *Raft) confirmLeadership() bool {
 
 	// 统计票数
 	votes := 1 // 自己算一票
-	majority := (len(peerIds)+1)/2 + 1
+	majority := len(peerIds)/2 + 1
 
 	// 设置一个较短的超时时间，避免读请求无限阻塞
-	// 通常取选举超时的一半或更短
-	timeout := time.After(electionTimeout / 2)
+	timeout := time.After(electionTimeout)
 
 	for i := 0; i < len(requests); i++ {
 		select {
@@ -364,6 +376,12 @@ func (r *Raft) getLogTerm(index uint64) (uint64, error) {
 	if index == 0 {
 		return 0, nil
 	}
+
+	// 检查是否在快照中
+	if r.snapshot != nil && index == r.snapshot.LastIncludedIndex {
+		return r.snapshot.LastIncludedTerm, nil
+	}
+
 	entry, err := r.store.GetEntry(index)
 	if err != nil {
 		log.Printf("[ERROR] failed to get log entry at index %d: %v", index, err)
@@ -392,7 +410,7 @@ func (r *Raft) getFirstLogIndex() (uint64, error) {
 }
 
 // proposeToLog 在【持有锁】的情况下，将命令写入本地日志。
-func (r *Raft) proposeToLog(command interface{}) (param.LogEntry, error) {
+func (r *Raft) proposeToLog(command any) (param.LogEntry, error) {
 	// 1. 从存储中获取最后一条日志的索引，以确定新日志的索引。
 	lastIndex, err := r.store.LastLogIndex()
 	if err != nil {
@@ -429,7 +447,7 @@ func (r *Raft) preHandleClientRequest(args *param.ClientArgs, reply *param.Clien
 
 // Commit 封装了将命令提交到 Raft 日志并等待其被应用的全过程。
 // 它返回从状态机获得的结果，一个表示成功的布尔值，以及当前的 Leader ID。
-func (r *Raft) Commit(command interface{}) (any, bool, int) {
+func (r *Raft) Commit(command any) (any, bool, int) {
 	index, _, isLeader := r.Submit(command)
 	if !isLeader {
 		// 在提交过程中，可能失去了 Leader 地位。
@@ -462,7 +480,7 @@ func (r *Raft) finalizeClientReply(args *param.ClientArgs, reply *param.ClientRe
 }
 
 // Submit 将一个普通的客户端命令追加到 Raft 日志中。
-func (r *Raft) Submit(command interface{}) (uint64, uint64, bool) {
+func (r *Raft) Submit(command any) (uint64, uint64, bool) {
 	r.mu.Lock()
 
 	// 1. 检查当前节点是否为 Leader。
@@ -515,6 +533,18 @@ func (r *Raft) ChangeConfig(newPeerIDs []int) (uint64, uint64, bool) {
 	// 3. 提议成功后，Leader 自身立即进入“联合共识”状态。
 	r.inJointConsensus = true
 	r.newPeerIds = newPeerIDs
+
+	// Initialize tracking state for new peers
+	for _, peerId := range newPeerIDs {
+		if _, ok := r.nextIndex[peerId]; !ok {
+			r.nextIndex[peerId] = newLogEntry.Index + 1
+			r.matchIndex[peerId] = 0
+			log.Printf("[Config Change] Initialized nextIndex[%d] = %d", peerId, r.nextIndex[peerId])
+		} else {
+			log.Printf("[Config Change] nextIndex[%d] already exists: %d", peerId, r.nextIndex[peerId])
+		}
+	}
+
 	peersToNotify := r.getAllPeerIDs()
 	r.mu.Unlock()
 
@@ -608,5 +638,64 @@ func (r *Raft) waitForAppliedLog(index uint64, timeout time.Duration) (any, bool
 	case <-time.After(timeout):
 		log.Printf("[Client] Timed out waiting for log index %d to be applied.", index)
 		return nil, false
+	}
+}
+
+// initLeaderState initializes leader state after election
+func (r *Raft) initLeaderState() {
+	// This method is called with the lock held.
+	lastLogIndex, err := r.store.LastLogIndex()
+	if err != nil {
+		log.Printf("[ERROR] Node %d (new leader) failed to get last log index to initialize state: %v", r.id, err)
+		// This is a critical error, might need to step down.
+		r.state = param.Follower
+		return
+	}
+
+	r.nextIndex = make(map[int]uint64)
+	r.matchIndex = make(map[int]uint64)
+	for _, peerId := range r.getAllPeerIDs() {
+		if peerId == r.id {
+			continue
+		}
+		r.nextIndex[peerId] = lastLogIndex + 1
+		r.matchIndex[peerId] = 0
+	}
+}
+
+// startHeartbeat starts periodic heartbeat loops
+func (r *Raft) startHeartbeat() {
+	// This method is called with the lock held.
+	go func() {
+		ticker := time.NewTicker(heartbeatInterval)
+		defer ticker.Stop()
+
+		// Send an initial heartbeat immediately without waiting for the first tick.
+		r.mu.Lock()
+		r.broadcastHeartbeat()
+		r.mu.Unlock()
+
+		for {
+			<-ticker.C
+
+			r.mu.Lock()
+			if r.state != param.Leader {
+				r.mu.Unlock()
+				return
+			}
+			r.broadcastHeartbeat()
+			r.mu.Unlock()
+		}
+	}()
+}
+
+// broadcastHeartbeat is a helper to send AppendEntries to all peers.
+func (r *Raft) broadcastHeartbeat() {
+	// This method must be called with the lock held.
+	for _, peerId := range r.getAllPeerIDs() {
+		if peerId == r.id {
+			continue
+		}
+		go r.sendAppendEntries(peerId)
 	}
 }

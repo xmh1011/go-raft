@@ -43,7 +43,7 @@ func (m *MockStorage) AppendEntries(entries []param.LogEntry) error {
 }
 
 // AppendEntries indicates an expected call of AppendEntries.
-func (mr *MockStorageMockRecorder) AppendEntries(entries interface{}) *gomock.Call {
+func (mr *MockStorageMockRecorder) AppendEntries(entries any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AppendEntries", reflect.TypeOf((*MockStorage)(nil).AppendEntries), entries)
 }
@@ -71,7 +71,7 @@ func (m *MockStorage) CompactLog(upToIndex uint64) error {
 }
 
 // CompactLog indicates an expected call of CompactLog.
-func (mr *MockStorageMockRecorder) CompactLog(upToIndex interface{}) *gomock.Call {
+func (mr *MockStorageMockRecorder) CompactLog(upToIndex any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CompactLog", reflect.TypeOf((*MockStorage)(nil).CompactLog), upToIndex)
 }
@@ -101,7 +101,7 @@ func (m *MockStorage) GetEntry(index uint64) (*param.LogEntry, error) {
 }
 
 // GetEntry indicates an expected call of GetEntry.
-func (mr *MockStorageMockRecorder) GetEntry(index interface{}) *gomock.Call {
+func (mr *MockStorageMockRecorder) GetEntry(index any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetEntry", reflect.TypeOf((*MockStorage)(nil).GetEntry), index)
 }
@@ -175,7 +175,7 @@ func (m *MockStorage) SaveSnapshot(snapshot *param.Snapshot) error {
 }
 
 // SaveSnapshot indicates an expected call of SaveSnapshot.
-func (mr *MockStorageMockRecorder) SaveSnapshot(snapshot interface{}) *gomock.Call {
+func (mr *MockStorageMockRecorder) SaveSnapshot(snapshot any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveSnapshot", reflect.TypeOf((*MockStorage)(nil).SaveSnapshot), snapshot)
 }
@@ -189,7 +189,7 @@ func (m *MockStorage) SetState(state param.HardState) error {
 }
 
 // SetState indicates an expected call of SetState.
-func (mr *MockStorageMockRecorder) SetState(state interface{}) *gomock.Call {
+func (mr *MockStorageMockRecorder) SetState(state any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetState", reflect.TypeOf((*MockStorage)(nil).SetState), state)
 }
@@ -203,7 +203,7 @@ func (m *MockStorage) TruncateLog(fromIndex uint64) error {
 }
 
 // TruncateLog indicates an expected call of TruncateLog.
-func (mr *MockStorageMockRecorder) TruncateLog(fromIndex interface{}) *gomock.Call {
+func (mr *MockStorageMockRecorder) TruncateLog(fromIndex any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "TruncateLog", reflect.TypeOf((*MockStorage)(nil).TruncateLog), fromIndex)
 }
@@ -240,7 +240,7 @@ func (m *MockStateMachine) Apply(entry param.LogEntry) any {
 }
 
 // Apply indicates an expected call of Apply.
-func (mr *MockStateMachineMockRecorder) Apply(entry interface{}) *gomock.Call {
+func (mr *MockStateMachineMockRecorder) Apply(entry any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Apply", reflect.TypeOf((*MockStateMachine)(nil).Apply), entry)
 }
@@ -254,7 +254,7 @@ func (m *MockStateMachine) ApplySnapshot(snapshot []byte) error {
 }
 
 // ApplySnapshot indicates an expected call of ApplySnapshot.
-func (mr *MockStateMachineMockRecorder) ApplySnapshot(snapshot interface{}) *gomock.Call {
+func (mr *MockStateMachineMockRecorder) ApplySnapshot(snapshot any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplySnapshot", reflect.TypeOf((*MockStateMachine)(nil).ApplySnapshot), snapshot)
 }
@@ -269,7 +269,7 @@ func (m *MockStateMachine) Get(key string) (string, error) {
 }
 
 // Get indicates an expected call of Get.
-func (mr *MockStateMachineMockRecorder) Get(key interface{}) *gomock.Call {
+func (mr *MockStateMachineMockRecorder) Get(key any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockStateMachine)(nil).Get), key)
 }

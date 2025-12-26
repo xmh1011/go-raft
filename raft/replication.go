@@ -53,15 +53,16 @@ func (r *Raft) determineReplicationAction(peerId int) replicationAction {
 	}
 
 	// 检查二：判断 Follower 是否落后太多，以至于其需要的日志已被本地快照压缩。
-	prevLogIndex := r.nextIndex[peerId] - 1
 	firstLogIndex, err := r.getFirstLogIndex()
 	if err != nil {
 		log.Printf("[ERROR] Node %d failed to get first log index: %v", r.id, err)
+		return actionSendLogs // Fallback to sending logs on error
 	}
-	if prevLogIndex < firstLogIndex-1 {
-		// 如果 Follower 需要的日志索引小于 Leader 本地日志的起始索引，
-		// 说明日志已被压缩，必须发送快照。
-		log.Printf("[Snapshot] Node %d log for peer %d (prevLogIndex=%d) is compacted. Decided to send snapshot.", r.id, peerId, prevLogIndex)
+
+	// 如果 Follower 需要的下一条日志索引小于 Leader 的第一条日志索引，
+	// 说明该日志已被压缩，必须发送快照。
+	if r.nextIndex[peerId] < firstLogIndex {
+		log.Printf("[Snapshot] Node %d log for peer %d (nextIndex=%d) is behind compacted log (firstLogIndex=%d). Decided to send snapshot.", r.id, peerId, r.nextIndex[peerId], firstLogIndex)
 		return actionSendSnapshot
 	}
 
@@ -176,14 +177,13 @@ func (r *Raft) handleFailedAppendEntries(peerId int, reply *param.AppendEntriesR
 	log.Printf("[Log Replication] Node %d rejected AppendEntries from leader %d (ConflictIndex=%d, ConflictTerm=%d)", peerId, r.id, reply.ConflictIndex, reply.ConflictTerm)
 
 	// 根据论文中的优化策略，快速回退 nextIndex。
-	r.nextIndex[peerId] = reply.ConflictIndex
-
-	firstIndex, err := r.getFirstLogIndex()
-	if err != nil {
-		log.Printf("[ERROR] Node %d failed to get first log index: %v", r.id, err)
-	}
-	if r.nextIndex[peerId] < firstIndex {
-		r.nextIndex[peerId] = firstIndex
+	if reply.ConflictIndex > 0 {
+		r.nextIndex[peerId] = reply.ConflictIndex
+	} else {
+		// 如果 ConflictIndex 为 0（异常情况），则回退一步
+		if r.nextIndex[peerId] > 1 {
+			r.nextIndex[peerId]--
+		}
 	}
 
 	go r.sendAppendEntries(peerId)
@@ -238,7 +238,7 @@ func (r *Raft) isReplicatedByMajority(index uint64) bool {
 			matchCountOld++
 		}
 	}
-	majorityOld := ((len(r.peerIds) + 1) / 2) + 1 // 包括 Leader 自身 + 节点数
+	majorityOld := (len(r.peerIds) / 2) + 1
 
 	if !r.inJointConsensus {
 		return matchCountOld >= majorityOld
@@ -255,7 +255,7 @@ func (r *Raft) isReplicatedByMajority(index uint64) bool {
 			matchCountNew++
 		}
 	}
-	majorityNew := (len(r.newPeerIds) + 1) / 2
+	majorityNew := (len(r.newPeerIds) / 2) + 1
 
 	return matchCountOld >= majorityOld && matchCountNew >= majorityNew
 }
@@ -341,6 +341,11 @@ func (r *Raft) checkLogConsistency(args *param.AppendEntriesArgs, reply *param.A
 	if err != nil {
 		log.Printf("[ERROR] Node %d failed to get entry %d from store: %v", r.id, args.PrevLogIndex, err)
 		reply.Success = false
+		// 如果获取日志失败（例如被压缩了），我们应该给 Leader 一个提示。
+		// 最好的方式是告诉 Leader 我们当前的最后一条日志索引，让它从那里开始尝试。
+		lastLogIndex, _ := r.store.LastLogIndex()
+		reply.ConflictIndex = lastLogIndex + 1
+		reply.ConflictTerm = 0
 		return false
 	}
 	// 检查获取到的日志条目是否与 Leader 的期望一致。
@@ -494,6 +499,14 @@ func (r *Raft) applyConfigChange(cmd param.ConfigChangeCommand, entryIndex uint6
 
 		// 如果当前节点是 Leader，它有责任立即提交第二阶段的配置日志 (C_new)，以完成变更。
 		if r.state == param.Leader {
+			// 初始化新加入节点的 nextIndex 和 matchIndex
+			lastLogIndex, _ := r.store.LastLogIndex()
+			for _, peerId := range r.newPeerIds {
+				if _, ok := r.nextIndex[peerId]; !ok {
+					r.nextIndex[peerId] = lastLogIndex + 1
+					r.matchIndex[peerId] = 0
+				}
+			}
 			r.proposeNewConfigEntry()
 		}
 	} else {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+
 	"github.com/xmh1011/go-raft/param"
 	"github.com/xmh1011/go-raft/storage"
 	"github.com/xmh1011/go-raft/transport"
@@ -138,7 +139,7 @@ func TestStartElection_LosesElection(t *testing.T) {
 		mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil),
 		// 选举超时，退回 Follower
 		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: math.MaxUint64}).
-			Do(func(interface{}) { close(revertedToFollower) }).Return(nil),
+			Do(func(any) { close(revertedToFollower) }).Return(nil),
 	)
 
 	// Mock RPCs
@@ -303,7 +304,7 @@ func TestStartElection_StepsDownOnAppendEntries(t *testing.T) {
 	// 模拟选举开始
 	gomock.InOrder(
 		// 成为 Candidate，持久化状态
-		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: 1}).Do(func(_ interface{}) {
+		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: 1}).Do(func(_ any) {
 			close(candidateStateReached)
 		}).Return(nil),
 		// 获取日志信息

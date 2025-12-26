@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"errors"
 	"log"
 	"strconv"
 	"time"
@@ -212,6 +213,10 @@ func (r *Raft) readSnapshotForSending(peerId int) (*param.Snapshot, error) {
 	if err != nil {
 		log.Printf("[ERROR] Node %d failed to read snapshot to send to peer %d: %v", r.id, peerId, err)
 		return nil, err
+	}
+	if snapshot == nil {
+		log.Printf("[ERROR] Node %d tried to send snapshot to peer %d, but no snapshot is available.", r.id, peerId)
+		return nil, errors.New("no snapshot available to send")
 	}
 	return snapshot, nil
 }

@@ -46,3 +46,4 @@ tmp
 log
 bin
 /unittest.txt
+/go-raft
