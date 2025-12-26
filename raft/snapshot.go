@@ -41,52 +41,99 @@ func (r *Raft) InstallSnapshot(args *param.InstallSnapshotArgs, reply *param.Ins
 }
 
 // TakeSnapshot 由上层应用（状态机）在合适的时候调用，以触发一次快照。
-// logSizeThreshold 是触发快照的日志大小阈值（例如，字节数或条目数）。
+// 为异步实现，避免阻塞 Raft 主循环。
 func (r *Raft) TakeSnapshot(logSizeThreshold int) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
-	// 1. 检查是否满足创建快照的条件（例如日志大小超过阈值）。
-	logSize, err := r.store.LogSize() // 假设 Storage 接口有一个 LogSize 方法
+	// 1. 防止并发快照
+	if r.isSnapshotting {
+		r.mu.Unlock()
+		return
+	}
+
+	// 2. 检查日志大小是否满足阈值
+	logSize, err := r.store.LogSize()
 	if err != nil || logSize < logSizeThreshold {
+		r.mu.Unlock()
 		return
 	}
 
-	log.Printf("[Snapshot] Node %d log size %d exceeds threshold %d, starting snapshot.", r.id, logSize, logSizeThreshold)
+	log.Printf("[Snapshot] Node %d log size %d exceeds threshold %d, preparing snapshot.", r.id, logSize, logSizeThreshold)
 
-	// 2. 获取快照元数据并创建快照。
-	snapshot, err := r.createSnapshot()
-	if err != nil {
-		log.Printf("[ERROR] Node %d failed to create snapshot metadata: %v", r.id, err)
-		return
-	}
-
-	// 3. 将快照持久化并压缩日志。
-	if err := r.persistSnapshot(snapshot); err != nil {
-		log.Printf("[ERROR] Node %d failed to persist snapshot: %v", r.id, err)
-		return
-	}
-
-	log.Printf("[Snapshot] Node %d created and saved snapshot up to index %d.", r.id, snapshot.LastIncludedIndex)
-}
-
-// createSnapshot 负责获取快照所需的元数据，并从状态机获取数据来构建快照对象。
-func (r *Raft) createSnapshot() (*param.Snapshot, error) {
+	// 3. 【同步阶段】捕获快照元数据和状态机数据
+	// 我们必须在持有锁的情况下捕获当前的 lastApplied 及其对应的 Term。
 	snapshotIndex := r.lastApplied
 	snapshotTermEntry, err := r.store.GetEntry(snapshotIndex)
 	if err != nil {
 		log.Printf("[ERROR] Node %d failed to get entry at index %d: %v", r.id, snapshotIndex, err)
-		return nil, err
+		r.mu.Unlock()
+		return
 	}
+	snapshotTerm := snapshotTermEntry.Term
 
+	// 获取状态机数据。
+	// 注意：如果 stateMachine.GetSnapshot() 非常耗时（例如全量序列化），这里仍然会阻塞 Raft。
+	// 生产级实现通常要求 StateMachine 支持 Copy-On-Write 或快速 Clone，
+	// 或者在此处仅获取一个只读视图/迭代器，将序列化工作移到异步 goroutine 中。
+	// 鉴于接口限制，我们假设 GetSnapshot 是相对快速的内存操作。
 	snapshotData, err := r.stateMachine.GetSnapshot()
 	if err != nil {
-		log.Printf("[ERROR] Node %d failed to get snapshot data from state machine: %v", r.id, err)
-		return nil, err
+		log.Printf("[ERROR] Node %d failed to get snapshot data: %v", r.id, err)
+		r.mu.Unlock()
+		return
 	}
 
-	snapshot := param.NewSnapshot(snapshotIndex, snapshotTermEntry.Term, snapshotData)
-	return snapshot, nil
+	// 标记开始快照，并释放锁
+	r.isSnapshotting = true
+	r.mu.Unlock()
+
+	// 4. 【异步阶段】执行耗时的 IO 操作
+	go func(index, term uint64, data []byte) {
+		// 确保 goroutine 结束时清理标志
+		defer func() {
+			r.mu.Lock()
+			r.isSnapshotting = false
+			r.mu.Unlock()
+		}()
+
+		log.Printf("[Snapshot] Node %d starting async persistence for index %d", r.id, index)
+
+		snapshot := param.NewSnapshot(index, term, data)
+
+		// A. 持久化快照到磁盘 (耗时 IO)
+		// 这不需要持有 Raft 锁，因为我们操作的是独立的快照文件
+		if err := r.store.SaveSnapshot(snapshot); err != nil {
+			log.Printf("[ERROR] Node %d failed to save snapshot async: %v", r.id, err)
+			return
+		}
+
+		// B. 压缩日志 (Compact Log)
+		// 这是一个关键操作，通常涉及删除旧的日志文件。
+		// 虽然删除文件是 IO 操作，但我们需要确保与 Raft 核心逻辑（如 AppendEntries）的安全性。
+		// 大多数 Storage 实现要求 CompactLog 时不能并发写入 Log，或者内部有锁。
+		// 为了安全起见，我们在更新内存状态和调用 CompactLog 时重新获取锁。
+		r.mu.Lock()
+
+		// 再次检查状态（防止在 IO 期间节点关闭或状态剧烈变化）
+		if r.state == param.Dead {
+			r.mu.Unlock()
+			return
+		}
+
+		// 执行日志截断
+		if err := r.store.CompactLog(index); err != nil {
+			log.Printf("[ERROR] Node %d failed to compact log async: %v", r.id, err)
+			r.mu.Unlock()
+			return
+		}
+
+		// 更新内存中的快照引用
+		r.snapshot = snapshot
+
+		log.Printf("[Snapshot] Node %d async snapshot finished. Saved and compacted up to index %d.", r.id, index)
+		r.mu.Unlock()
+
+	}(snapshotIndex, snapshotTerm, snapshotData)
 }
 
 // handleSnapshotTerm 负责处理 InstallSnapshot RPC 中的任期检查和心跳逻辑。
