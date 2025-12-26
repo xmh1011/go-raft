@@ -9,6 +9,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+
 	"github.com/xmh1011/go-raft/param"
 	"github.com/xmh1011/go-raft/storage"
 	"github.com/xmh1011/go-raft/transport"

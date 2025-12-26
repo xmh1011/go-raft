@@ -5,15 +5,16 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
 	"github.com/xmh1011/go-raft/param"
 )
 
 // mockRPCServer 是 transport.RPCServer 接口的一个模拟实现，用于测试。
 type mockRPCServer struct {
 	// lastArgs 记录最后一次被调用时传入的参数
-	lastArgs interface{}
+	lastArgs any
 	// replyToReturn 是我们预设的、希望 mock 方法写入到 reply 参数中的内容
-	replyToReturn interface{}
+	replyToReturn any
 	// errorToReturn 是我们预设的、希望 mock 方法返回的错误
 	errorToReturn error
 }

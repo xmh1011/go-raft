@@ -43,7 +43,7 @@ func (m *MockTransport) SendAppendEntries(target string, req *param.AppendEntrie
 }
 
 // SendAppendEntries indicates an expected call of SendAppendEntries.
-func (mr *MockTransportMockRecorder) SendAppendEntries(target, req, resp interface{}) *gomock.Call {
+func (mr *MockTransportMockRecorder) SendAppendEntries(target, req, resp any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendAppendEntries", reflect.TypeOf((*MockTransport)(nil).SendAppendEntries), target, req, resp)
 }
@@ -57,7 +57,7 @@ func (m *MockTransport) SendClientRequest(target string, req *param.ClientArgs, 
 }
 
 // SendClientRequest indicates an expected call of SendClientRequest.
-func (mr *MockTransportMockRecorder) SendClientRequest(target, req, resp interface{}) *gomock.Call {
+func (mr *MockTransportMockRecorder) SendClientRequest(target, req, resp any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendClientRequest", reflect.TypeOf((*MockTransport)(nil).SendClientRequest), target, req, resp)
 }
@@ -71,7 +71,7 @@ func (m *MockTransport) SendInstallSnapshot(target string, req *param.InstallSna
 }
 
 // SendInstallSnapshot indicates an expected call of SendInstallSnapshot.
-func (mr *MockTransportMockRecorder) SendInstallSnapshot(target, req, resp interface{}) *gomock.Call {
+func (mr *MockTransportMockRecorder) SendInstallSnapshot(target, req, resp any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendInstallSnapshot", reflect.TypeOf((*MockTransport)(nil).SendInstallSnapshot), target, req, resp)
 }
@@ -85,7 +85,7 @@ func (m *MockTransport) SendRequestVote(target string, req *param.RequestVoteArg
 }
 
 // SendRequestVote indicates an expected call of SendRequestVote.
-func (mr *MockTransportMockRecorder) SendRequestVote(target, req, resp interface{}) *gomock.Call {
+func (mr *MockTransportMockRecorder) SendRequestVote(target, req, resp any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendRequestVote", reflect.TypeOf((*MockTransport)(nil).SendRequestVote), target, req, resp)
 }

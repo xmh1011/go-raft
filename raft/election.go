@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	heartbeatInterval = 10 * time.Millisecond // 心跳间隔
-	electionTimeout   = 50 * time.Millisecond // 选举超时时间
+	heartbeatInterval = 50 * time.Millisecond  // 心跳间隔
+	electionTimeout   = 200 * time.Millisecond // 选举超时时间
 )
 
 // electionContext 是一个辅助结构体，用于封装单次选举过程中的所有状态。
@@ -35,7 +35,6 @@ func newElectionContext(r *Raft) *electionContext {
 
 	oldPeers := append([]int(nil), r.peerIds...)
 	newPeers := append([]int(nil), r.newPeerIds...)
-	oldPeers = append(oldPeers, r.id)
 
 	ctx := &electionContext{
 		inJoint:        r.inJointConsensus,
@@ -46,7 +45,6 @@ func newElectionContext(r *Raft) *electionContext {
 		votesNewConfig: 0,
 	}
 	if ctx.inJoint {
-		ctx.newPeers = append(ctx.newPeers, r.id)
 		ctx.majorityNew = len(ctx.newPeers)/2 + 1
 		if _, isNew := findPeer(r.id, ctx.newPeers); isNew {
 			ctx.votesNewConfig = 1
@@ -308,7 +306,8 @@ func (r *Raft) processVote(ctx *electionContext, result *param.VoteResult, elect
 
 		// 检查是否满足获胜条件。
 		if ctx.checkWinCondition() {
-			r.transitionToLeader(electionTerm)
+			// 注意：这里不再调用 transitionToLeader，而是只返回 true。
+			// 状态转换由 handleElectionResult 负责。
 			return true // 选举已获胜
 		}
 	}
@@ -389,57 +388,6 @@ func (r *Raft) sendVoteRequest(peerId int, term uint64, lastLogIndex uint64, las
 	}
 
 	voteChan <- &param.VoteResult{VoterID: peerId, VoteGranted: reply.VoteGranted}
-}
-
-// initLeaderState initializes leader state after election
-func (r *Raft) initLeaderState() {
-	// This method is called with the lock held.
-	lastLogIndex, err := r.store.LastLogIndex()
-	if err != nil {
-		log.Printf("[ERROR] Node %d (new leader) failed to get last log index to initialize state: %v", r.id, err)
-		// This is a critical error, might need to step down.
-		r.state = param.Follower
-		return
-	}
-
-	r.nextIndex = make(map[int]uint64)
-	r.matchIndex = make(map[int]uint64)
-	for _, peerId := range r.peerIds {
-		r.nextIndex[peerId] = lastLogIndex + 1
-		r.matchIndex[peerId] = 0
-	}
-}
-
-// startHeartbeat starts periodic heartbeat loops
-func (r *Raft) startHeartbeat() {
-	// This method is called with the lock held.
-	go func() {
-		ticker := time.NewTicker(heartbeatInterval)
-		defer ticker.Stop()
-
-		// Send an initial heartbeat immediately without waiting for the first tick.
-		r.broadcastHeartbeat()
-
-		for {
-			<-ticker.C
-
-			r.mu.Lock()
-			if r.state != param.Leader {
-				r.mu.Unlock()
-				return
-			}
-			r.broadcastHeartbeat()
-			r.mu.Unlock()
-		}
-	}()
-}
-
-// broadcastHeartbeat is a helper to send AppendEntries to all peers.
-func (r *Raft) broadcastHeartbeat() {
-	// This method must be called with the lock held.
-	for _, peerId := range r.peerIds {
-		go r.sendAppendEntries(peerId)
-	}
 }
 
 // handleVoteTermLogic 封装了所有与任期相关的逻辑。

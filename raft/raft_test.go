@@ -9,6 +9,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+
 	"github.com/xmh1011/go-raft/param"
 	"github.com/xmh1011/go-raft/storage"
 	"github.com/xmh1011/go-raft/transport"
@@ -173,6 +174,9 @@ func TestClientRequest_LeaderProcessesCommand(t *testing.T) {
 	defer r.Stop()
 	r.state = param.Leader
 	r.currentTerm = 2
+	// 初始化 nextIndex，避免触发快照逻辑
+	r.nextIndex[2] = 6
+	r.nextIndex[3] = 6
 
 	args := &param.ClientArgs{ClientID: 123, SequenceNum: 1, Command: "test-command"}
 	reply := &param.ClientReply{}
@@ -351,7 +355,7 @@ func TestRun_FollowerStartsElectionOnTimeout(t *testing.T) {
 	gomock.InOrder(
 		// 2. 成为 Candidate，持久化状态
 		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 2, VotedFor: 1}).Return(nil).
-			Do(func(interface{}) {
+			Do(func(any) {
 				close(electionStartedChan) // 收到调用，发出信号
 			}),
 		// 3. startRealElection 还会获取日志信息

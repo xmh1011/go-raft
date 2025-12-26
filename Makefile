@@ -6,10 +6,11 @@ PKGS_TO_TEST := $(shell go list -f '{{if .TestGoFiles}}{{.ImportPath}}{{end}}' .
 
 # Define the output binary name (if you have a build target)
 BINARY_NAME=go-raft
+CMD_PATH=./cmd/raft-server
 
 # --- Targets ---
 
-.PHONY: all deps test cover install-mockgen mockgen clean help
+.PHONY: all deps build test integration-test cover install-mockgen mockgen clean help
 
 .DEFAULT_GOAL := help
 
@@ -28,10 +29,20 @@ deps:
 	@echo " tidy and downloading dependencies..."
 	@go mod tidy
 
+## build: Build the raft-server binary.
+build: deps
+	@echo " building $(BINARY_NAME)..."
+	@go build -o $(BINARY_NAME) $(CMD_PATH)
+
 ## test: Run all unit tests with race detector and coverage for ALL packages.
 test: deps
-	@echo " running tests..."
+	@echo " running unit tests..."
 	@go test -race -timeout=2m -v -cover -coverprofile=coverage.txt -coverpkg=./... $(PKGS_TO_TEST)
+
+## integration-test: Run integration tests.
+integration-test: deps
+	@echo " running integration tests..."
+	@go test -race -v ./tests/...
 
 ## cover: Open the HTML coverage report in your browser.
 cover: test

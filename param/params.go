@@ -1,5 +1,14 @@
 package param
 
+import (
+	"encoding/gob"
+)
+
+func init() {
+	gob.Register(KVCommand{})
+	gob.Register(ConfigChangeCommand{})
+}
+
 // State 定义节点的状态（Consensus Module State）
 type State int
 
