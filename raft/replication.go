@@ -402,12 +402,13 @@ func (r *Raft) updateFollowerCommitIndex(args *param.AppendEntriesArgs) {
 // applyLogs 将已提交的日志应用到状态机。此函数会在后台 goroutine 中运行。
 func (r *Raft) applyLogs() {
 	// 1. 从存储中获取所有需要应用的日志条目。
-	entriesToApply, lastApplied := r.fetchEntriesToApply()
+	entriesToApply, lastAppliedBefore := r.fetchEntriesToApply()
 	if len(entriesToApply) == 0 {
 		return
 	}
 
-	log.Printf("[State Machine] Node %d applying %d entries from index %d to %d", r.id, len(entriesToApply), lastApplied+1, r.lastApplied)
+	endIndex := lastAppliedBefore + uint64(len(entriesToApply))
+	log.Printf("[State Machine] Node %d applying %d entries from index %d to %d", r.id, len(entriesToApply), lastAppliedBefore+1, endIndex)
 
 	// 2. 遍历并分发每一条待应用的日志。
 	r.dispatchEntries(entriesToApply)
@@ -462,17 +463,20 @@ func (r *Raft) dispatchEntries(entries []param.LogEntry) {
 		}
 
 		r.mu.Lock()
-		// 1. 在持有锁的情况下，安全地从 map 中获取 channel 并【删除】它。
 		notifyChan, ok := r.notifyApply[entry.Index]
 		if ok {
+			// 在发送通知前，从 map 中删除 channel，防止重复通知或内存泄漏。
 			delete(r.notifyApply, entry.Index)
 		}
-		// 2. 立即释放锁。
+		// 打印 map 内容以调试
+		log.Printf("[Client] dispatchEntries: map content before notify: %+v", r.notifyApply)
 		r.mu.Unlock()
 
-		// 3. 在【没有持有锁】的情况下，安全地进行可能阻塞的 channel 发送操作。
 		if ok {
+			log.Printf("[Client] dispatchEntries: Notifying for index %d", entry.Index)
 			notifyChan <- result
+		} else {
+			log.Printf("[Client] dispatchEntries: No notify channel found for index %d", entry.Index)
 		}
 	}
 }
@@ -483,31 +487,49 @@ func (r *Raft) applyConfigChange(cmd param.ConfigChangeCommand, entryIndex uint6
 	defer r.mu.Unlock()
 
 	if !r.inJointConsensus {
-		// 这是配置变更的第一阶段：进入“联合共识”状态。
+		// --- Phase 1: 进入联合共识 (C_old,new) ---
 		r.inJointConsensus = true
 		r.newPeerIds = cmd.NewPeerIDs
 		log.Printf("[Config Change] Node %d entering joint consensus at index %d.", r.id, entryIndex)
 
-		// 如果当前节点是 Leader，它有责任立即提交第二阶段的配置日志，以完成变更。
+		// 如果当前节点是 Leader，它有责任立即提交第二阶段的配置日志 (C_new)，以完成变更。
 		if r.state == param.Leader {
 			r.proposeNewConfigEntry()
 		}
 	} else {
-		// 这是配置变更的第二阶段：从“联合共识”过渡到新的最终配置。
+		// --- Phase 2: 提交新配置 (C_new) ---
+		// 此时联合共识结束，节点切换到仅使用新配置。
 		r.peerIds = r.newPeerIds
 		r.newPeerIds = nil
 		r.inJointConsensus = false
 		log.Printf("[Config Change] Node %d has transitioned to new configuration at index %d.", r.id, entryIndex)
+
+		// 检查自己是否还属于新配置。
+		// 如果 Leader 发现自己被移除了，必须立即“退位” (Step Down)。
+		_, exists := findPeer(r.id, r.peerIds)
+		if !exists && r.state == param.Leader {
+			log.Printf("[Config Change] Leader %d detected it is NOT in the new configuration. Stepping down.", r.id)
+
+			// 自动降级为 Follower。
+			// 使用 r.currentTerm 即可，因为这不是因为发现了更高任期，而是因为配置变更逻辑。
+			// becomeFollower 会更新状态并重置状态机，这会使 Leader 的心跳协程(startHeartbeat)在下一次循环检测时自动退出。
+			if err := r.becomeFollower(r.currentTerm); err != nil {
+				log.Printf("[ERROR] Node %d failed to step down after removal: %v", r.id, err)
+			}
+			return
+		}
 	}
 }
 
 // applyStateMachineCommand 将普通的日志条目作为 CommitEntry 发送到客户端的状态机通道。
 func (r *Raft) applyStateMachineCommand(entry param.LogEntry) {
 	// 这个操作在 Raft 锁之外执行，以避免状态机处理缓慢时阻塞 Raft 的核心逻辑。
-	r.commitChan <- param.CommitEntry{
-		Command: entry.Command,
-		Index:   entry.Index,
-		Term:    entry.Term,
+	if r.commitChan != nil {
+		r.commitChan <- param.CommitEntry{
+			Command: entry.Command,
+			Index:   entry.Index,
+			Term:    entry.Term,
+		}
 	}
 }
 

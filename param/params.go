@@ -31,14 +31,16 @@ type RequestVoteArgs struct {
 	CandidateId  int    // 候选人的ID
 	LastLogIndex uint64 // 候选人最后一条日志的索引
 	LastLogTerm  uint64 // 候选人最后一条日志的任期号
+	PreVote      bool   // 是否是预投票
 }
 
-func NewRequestVoteArgs(term uint64, candidateId int, lastLogIndex, lastLogTerm uint64) *RequestVoteArgs {
+func NewRequestVoteArgs(term uint64, candidateId int, lastLogIndex, lastLogTerm uint64, isPreVote bool) *RequestVoteArgs {
 	return &RequestVoteArgs{
 		Term:         term,
 		CandidateId:  candidateId,
 		LastLogIndex: lastLogIndex,
 		LastLogTerm:  lastLogTerm,
+		PreVote:      isPreVote,
 	}
 }
 

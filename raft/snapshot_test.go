@@ -29,6 +29,9 @@ func TestTakeSnapshot_Success(t *testing.T) {
 	r.lastApplied = 100 // 假设状态机已应用到索引 100
 	logSizeThreshold := 1000
 
+	// 用于同步异步操作的 channel
+	done := make(chan struct{})
+
 	// --- 设置 Mock 期望 (Expectations) ---
 	gomock.InOrder(
 		mockStore.EXPECT().LogSize().Return(logSizeThreshold+1, nil).Times(1),
@@ -44,11 +47,22 @@ func TestTakeSnapshot_Success(t *testing.T) {
 		}).Times(1),
 
 		// 期望5: 压缩日志
-		mockStore.EXPECT().CompactLog(uint64(100)).Return(nil).Times(1),
+		// 这是异步操作的最后一步，调用完成后关闭 done channel 通知测试结束
+		mockStore.EXPECT().CompactLog(uint64(100)).Return(nil).Do(func(_ uint64) {
+			close(done)
+		}).Times(1),
 	)
 
 	// --- Act: 执行阶段 ---
 	r.TakeSnapshot(logSizeThreshold)
+
+	// 等待异步操作完成
+	select {
+	case <-done:
+		// 成功
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout waiting for snapshot async operations")
+	}
 }
 
 // TestInstallSnapshot_Success 测试 Follower 成功安装 Leader 发来的快照。
@@ -180,17 +194,31 @@ func TestTakeSnapshot_FailsOnSaveError(t *testing.T) {
 	r.lastApplied = 100
 	logSizeThreshold := 1000
 
+	// 用于同步异步操作的 channel
+	done := make(chan struct{})
+
 	// --- 设置 Mock 期望 ---
 	gomock.InOrder(
 		mockStore.EXPECT().LogSize().Return(logSizeThreshold+1, nil),
 		mockStore.EXPECT().GetEntry(uint64(100)).Return(&param.LogEntry{Term: 5, Index: 100}, nil),
 		mockSM.EXPECT().GetSnapshot().Return([]byte("test snapshot data"), nil),
 		// 期望: SaveSnapshot 被调用，但我们让它模拟一个错误返回。
-		mockStore.EXPECT().SaveSnapshot(gomock.Any()).Return(errors.New("disk is full")),
+		// 此时流程应该中止，所以在这里关闭 done channel
+		mockStore.EXPECT().SaveSnapshot(gomock.Any()).Do(func(_ *param.Snapshot) {
+			close(done)
+		}).Return(errors.New("disk is full")),
 	)
 
 	// --- Act ---
 	r.TakeSnapshot(logSizeThreshold)
+
+	// 等待异步操作完成
+	select {
+	case <-done:
+		// 成功
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout waiting for SaveSnapshot")
+	}
 }
 
 // TestInstallSnapshot_FailsOnApplyError 测试当状态机应用快照失败时，流程应中止。

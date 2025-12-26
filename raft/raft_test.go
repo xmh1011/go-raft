@@ -341,17 +341,32 @@ func TestRun_FollowerStartsElectionOnTimeout(t *testing.T) {
 
 	// 3. 期望：当选举超时时，Run() 循环会调用 startElection()。
 	electionStartedChan := make(chan struct{})
+
+	// --- Pre-Vote 阶段 ---
+	// 1. 获取日志
+	mockStore.EXPECT().LastLogIndex().Return(uint64(0), nil)
+	// (日志为空，不需要 GetEntry)
+
+	// --- Real Vote 阶段 ---
 	gomock.InOrder(
-		// 成为 Candidate，持久化状态
+		// 2. 成为 Candidate，持久化状态
 		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 2, VotedFor: 1}).Return(nil).
 			Do(func(interface{}) {
 				close(electionStartedChan) // 收到调用，发出信号
 			}),
-		// startElection 还会获取日志信息
+		// 3. startRealElection 还会获取日志信息
 		mockStore.EXPECT().LastLogIndex().Return(uint64(0), nil),
 	)
-	// 选举启动后会广播投票请求
-	mockTrans.EXPECT().SendRequestVote(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	// 4. 选举启动后会广播投票请求 (Pre-Vote 和 Real Vote)
+	mockTrans.EXPECT().SendRequestVote(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(id string, args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
+			if args.PreVote {
+				reply.Term = args.Term
+				reply.VoteGranted = true
+			}
+			return nil
+		}).AnyTimes()
 
 	// 5. 启动 Run() 循环
 	go r.Run()
@@ -533,24 +548,40 @@ func TestHandleLinearizableRead_Success(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	mockSM := storage.NewMockStateMachine(ctrl)
-	r := &Raft{
-		id:          1,
-		peerIds:     []int{2, 3},
-		state:       param.Leader,
-		currentTerm: 1,
-		commitIndex: 10,
-		lastApplied: 10, // 状态机已同步
-		lastAck: map[int]time.Time{
-			2: time.Now(), // 租约有效
-			3: time.Now(),
-		},
-		stateMachine: mockSM,
-		mu:           sync.Mutex{},
+	mockStore := storage.NewMockStorage(ctrl)
+	mockTrans := transport.NewMockTransport(ctrl)
+
+	// 期望 NewRaft 内部的 GetState 调用
+	mockStore.EXPECT().GetState().Return(param.HardState{}, nil).Times(1)
+
+	r := NewRaft(1, []int{2, 3}, mockStore, mockSM, mockTrans, nil)
+	r.state = param.Leader
+	r.currentTerm = 1
+	r.commitIndex = 10
+	r.lastApplied = 10 // 状态机已同步
+	r.lastAck = map[int]time.Time{
+		2: time.Now(), // 租约有效
+		3: time.Now(),
 	}
-	r.lastAppliedCond = sync.NewCond(&r.mu)
+	// 初始化 nextIndex，防止 confirmLeadership 中 panic
+	r.nextIndex[2] = 11
+	r.nextIndex[3] = 11
 
 	cmd := param.KVCommand{Op: "get", Key: "testKey"}
 	reply := &param.ClientReply{}
+
+	// --- 设置 Mock 期望 ---
+	// confirmLeadership 会调用 getLogTerm，进而调用 store.GetEntry
+	// 假设 prevLogIndex 是 10
+	mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 1, Index: 10}, nil).AnyTimes()
+
+	// confirmLeadership 会发送心跳
+	mockTrans.EXPECT().SendAppendEntries(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(id string, args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
+			reply.Term = 1
+			reply.Success = true
+			return nil
+		}).AnyTimes()
 
 	// 期望状态机被 Get
 	mockSM.EXPECT().Get("testKey").Return("testValue", nil).Times(1)
@@ -569,8 +600,11 @@ func TestClientRequest_ReadWriteBranching(t *testing.T) {
 	mockStore := storage.NewMockStorage(ctrl)
 	mockSM := storage.NewMockStateMachine(ctrl)
 	mockTrans := transport.NewMockTransport(ctrl)
+
+	// 这里必须保留带缓冲的 channel，防止死锁
+	commitChan := make(chan param.CommitEntry, 10)
+
 	mockStore.EXPECT().GetState().Return(param.HardState{}, nil).Times(1)
-	commitChan := make(chan param.CommitEntry, 10) // 使用带缓冲的 channel
 	r := NewRaft(1, []int{2, 3}, mockStore, mockSM, mockTrans, commitChan)
 	defer r.Stop()
 
@@ -593,6 +627,18 @@ func TestClientRequest_ReadWriteBranching(t *testing.T) {
 		args := &param.ClientArgs{Command: getCmd}
 		reply := &param.ClientReply{}
 
+		// --- 关键修改：不要使用 gomock.Any() ---
+		// confirmLeadership 会检查 prevLogIndex (即 index 1)
+		// 如果使用 Any()，它会拦截后续 WriteRequest 中对 index 2 的调用！
+		mockStore.EXPECT().GetEntry(uint64(1)).Return(&param.LogEntry{Term: 1, Index: 1}, nil).AnyTimes()
+
+		mockTrans.EXPECT().SendAppendEntries(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(id string, args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
+				reply.Term = 1
+				reply.Success = true
+				return nil
+			}).AnyTimes()
+
 		mockStore.EXPECT().LastLogIndex().Times(0)
 		mockSM.EXPECT().Get("key1").Return("value1", nil).Times(1)
 
@@ -608,33 +654,20 @@ func TestClientRequest_ReadWriteBranching(t *testing.T) {
 		args := &param.ClientArgs{ClientID: 123, SequenceNum: 1, Command: setCmd}
 		reply := &param.ClientReply{}
 
-		// 1. 期望同步调用（在 ClientRequest goroutine 中）
-		gomock.InOrder(
-			// proposeToLog 第一次调用 LastLogIndex
-			mockStore.EXPECT().LastLogIndex().Return(uint64(1), nil).Times(1),
-			// proposeToLog 第二次调用 AppendEntries
-			mockStore.EXPECT().AppendEntries(gomock.Any()).Return(nil).Times(1),
-		)
+		// 1. 期望同步调用
+		callLastLog1 := mockStore.EXPECT().LastLogIndex().Return(uint64(1), nil).Times(1)
+		callAppend := mockStore.EXPECT().AppendEntries(gomock.Any()).Return(nil).Times(1).After(callLastLog1)
 
-		// 2. 期望所有异步调用（在后台 goroutine 中）
-
-		// a. 允许 prepareAppendEntriesArgs 和 findMajorityCommitIndex 多次调用
-		//    它们应该看到 *新* 的 last index (2)
-		mockStore.EXPECT().LastLogIndex().Return(uint64(2), nil).AnyTimes()
-
-		// b. 允许 determineReplicationAction 多次调用
+		// 2. 期望异步调用
+		mockStore.EXPECT().LastLogIndex().Return(uint64(2), nil).AnyTimes().After(callAppend)
 		mockStore.EXPECT().FirstLogIndex().Return(uint64(1), nil).AnyTimes()
 
-		// c. 允许 prepareAppendEntriesArgs 获取 prevLogTerm (index 1)
+		// 这里的期望现在可以正确匹配了，因为之前的 GetEntry(1) 不会拦截 GetEntry(2)
 		mockStore.EXPECT().GetEntry(uint64(1)).Return(&param.LogEntry{Term: 1, Index: 1}, nil).AnyTimes()
-
-		// d. 允许 applyLogs 和 prepareAppendEntriesArgs 获取条目 2
 		mockStore.EXPECT().GetEntry(uint64(2)).Return(&param.LogEntry{Command: setCmd, Term: 1, Index: 2}, nil).AnyTimes()
 
-		// e. 允许 applyLogs 调用状态机
 		mockSM.EXPECT().Apply(gomock.Any()).Return(nil).AnyTimes()
 
-		// f. 允许后台 RPC 调用并返回成功
 		mockTrans.EXPECT().SendAppendEntries(gomock.Any(), gomock.Any(), gomock.Any()).
 			DoAndReturn(func(id string, args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
 				reply.Success = true
@@ -642,7 +675,6 @@ func TestClientRequest_ReadWriteBranching(t *testing.T) {
 				return nil
 			}).AnyTimes()
 
-		// g. Leader 节点不会调用 Get()
 		mockSM.EXPECT().Get(gomock.Any()).Times(0)
 
 		// --- 运行测试 ---
@@ -653,11 +685,11 @@ func TestClientRequest_ReadWriteBranching(t *testing.T) {
 			close(requestDone)
 		}()
 
-		// 等待 Raft 逻辑（ApplyLogs）完成
+		// 等待 Raft 逻辑完成
 		select {
 		case <-requestDone:
 			// success
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(1 * time.Second): // 稍微增加一点超时时间以防万一
 			t.Fatal("ClientRequest goroutine did not finish. Deadlock.")
 		}
 
@@ -686,21 +718,30 @@ func TestHandleLinearizableRead_NotLeader(t *testing.T) {
 func TestHandleLinearizableRead_LeaseCheckFails(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
+	mockStore := storage.NewMockStorage(ctrl)
+	mockTrans := transport.NewMockTransport(ctrl)
+
 	r := &Raft{
 		id:          1,
 		peerIds:     []int{2, 3, 4, 5}, // 5个节点，多数需要4个 (1 + 3)
 		state:       param.Leader,
 		currentTerm: 1,
-		lastAck: map[int]time.Time{
-			2: time.Now(),                           // 1 (self) + 1 (peer) = 2 acks. 不足多数
-			3: time.Now().Add(-2 * electionTimeout), // 3, 4, 5 超时
-			4: time.Now().Add(-2 * electionTimeout),
-			5: time.Now().Add(-2 * electionTimeout),
-		},
-		mu: sync.Mutex{},
+		store:       mockStore,
+		trans:       mockTrans,
+		nextIndex:   map[int]uint64{2: 1, 3: 1, 4: 1, 5: 1}, // 初始化 nextIndex
+		mu:          sync.Mutex{},
 	}
 	cmd := param.KVCommand{Op: "get", Key: "testKey"}
 	reply := &param.ClientReply{}
+
+	// Mock confirmLeadership
+	// 假设所有节点都超时或拒绝
+	mockStore.EXPECT().GetEntry(gomock.Any()).Return(&param.LogEntry{Term: 1, Index: 0}, nil).AnyTimes()
+	mockTrans.EXPECT().SendAppendEntries(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(id string, args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
+			// 模拟网络分区或超时
+			return nil
+		}).AnyTimes()
 
 	err := r.handleLinearizableRead(cmd, reply)
 	assert.NoError(t, err)
@@ -713,18 +754,20 @@ func TestHandleLinearizableRead_WaitsForApply(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	mockSM := storage.NewMockStateMachine(ctrl)
+	mockStore := storage.NewMockStorage(ctrl)
+	mockTrans := transport.NewMockTransport(ctrl)
+
 	r := &Raft{
-		id:          1,
-		peerIds:     []int{2, 3},
-		state:       param.Leader,
-		currentTerm: 1,
-		commitIndex: 10, // 读索引为 10
-		lastApplied: 9,  // 状态机落后
-		lastAck: map[int]time.Time{
-			2: time.Now(), // 租约有效
-			3: time.Now(),
-		},
+		id:           1,
+		peerIds:      []int{2, 3},
+		state:        param.Leader,
+		currentTerm:  1,
+		commitIndex:  10, // 读索引为 10
+		lastApplied:  9,  // 状态机落后
+		store:        mockStore,
+		trans:        mockTrans,
 		stateMachine: mockSM,
+		nextIndex:    map[int]uint64{2: 11, 3: 11},
 		mu:           sync.Mutex{},
 	}
 	r.lastAppliedCond = sync.NewCond(&r.mu)
@@ -732,6 +775,15 @@ func TestHandleLinearizableRead_WaitsForApply(t *testing.T) {
 	cmd := param.KVCommand{Op: "get", Key: "testKey"}
 	reply := &param.ClientReply{}
 	readDone := make(chan struct{})
+
+	// Mock confirmLeadership
+	mockStore.EXPECT().GetEntry(gomock.Any()).Return(&param.LogEntry{Term: 1, Index: 10}, nil).AnyTimes()
+	mockTrans.EXPECT().SendAppendEntries(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(id string, args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
+			reply.Term = 1
+			reply.Success = true
+			return nil
+		}).AnyTimes()
 
 	// 期望 Get 被调用，但在 lastApplied 更新后
 	mockSM.EXPECT().Get("testKey").Return("testValue", nil).Times(1)

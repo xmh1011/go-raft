@@ -2,7 +2,6 @@ package raft
 
 import (
 	"math"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,20 +33,22 @@ func TestStartElection_WinsElection(t *testing.T) {
 	r.currentTerm = 5
 
 	// --- Setup mocks for the entire election and leader transition flow ---
+
+	// 1. Pre-Vote 阶段获取日志
+	mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil)
+	mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil)
+
+	// 2. 正式选举阶段
 	gomock.InOrder(
+		// 成为 Candidate
 		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: 1}).Return(nil),
+		// 获取日志
 		mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil),
 		mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil),
 	)
 
-	mockTrans.EXPECT().SendRequestVote(strconv.Itoa(2), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(id string, args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
-			reply.Term = args.Term
-			reply.VoteGranted = true
-			return nil
-		}).AnyTimes()
-
-	mockTrans.EXPECT().SendRequestVote(strconv.Itoa(3), gomock.Any(), gomock.Any()).
+	// Mock RPCs: Pre-Vote 和 RequestVote 都成功
+	mockTrans.EXPECT().SendRequestVote(gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(id string, args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
 			reply.Term = args.Term
 			reply.VoteGranted = true
@@ -77,35 +78,35 @@ func TestStartElection_WinsElection(t *testing.T) {
 			return nil
 		}).AnyTimes()
 
-	// 1. Initialize candidate state
-	r.mu.Lock()
-	err := r.initializeCandidateState()
-	r.mu.Unlock()
-	assert.NoError(t, err)
+	// 1. Initialize candidate state (Manually trigger election flow)
+	// 注意：这里我们不再手动调用 initializeCandidateState，而是调用 startElection
+	// 但为了保持测试的可控性，我们可能需要等待状态变化。
+	// 不过原测试是手动一步步调用的，现在 startElection 封装了所有步骤。
+	// 我们这里直接调用 startElection 并等待结果。
 
-	// 2. Broadcast votes and collect them (simulated)
-	lastLogIndex, lastLogTerm, err := r.getLastLogInfoForElection()
-	assert.NoError(t, err)
-	voteChan := r.broadcastVoteRequests(6, lastLogIndex, lastLogTerm)
+	// 为了让测试能等待 Leader 状态，我们使用一个循环检查
+	go r.startElection()
 
-	// 3. Process votes until win condition is met
-	ctx := newElectionContext(r)
-	for i := 0; i < len(peerIds); i++ {
-		result := <-voteChan
-		if r.processVote(ctx, result, 6) {
-			break // Election won
+	// 等待变为 Leader
+	success := false
+	for i := 0; i < 20; i++ {
+		r.mu.Lock()
+		if r.state == param.Leader {
+			success = true
+			r.mu.Unlock()
+			break
 		}
+		r.mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
 	}
+	assert.True(t, success, "Node failed to become leader")
 
 	// 4. Manually transition to leader, BUT DO NOT START THE HEARTBEAT LOOP
-	r.mu.Lock()
-	assert.Equal(t, param.Leader, r.state, "expected state to be Leader")
-	// This is the key: we manually call broadcastHeartbeat once
-	// instead of letting the code call startHeartbeat() which creates the infinite loop.
-	r.broadcastHeartbeat()
-	r.mu.Unlock()
+	// 由于 startElection 会自动调用 transitionToLeader 并启动心跳，
+	// 我们这里的测试逻辑其实已经变了。startElection 会启动心跳 goroutine。
+	// 上面的 wg.Wait() 可能会因为心跳循环而一直被触发。
+	// 但我们只 Add 了 2，所以只要收到 2 个心跳就会返回。
 
-	// Wait for the single, manually triggered heartbeat to complete.
 	wg.Wait()
 }
 
@@ -124,22 +125,36 @@ func TestStartElection_LosesElection(t *testing.T) {
 	r.state = param.Follower
 	r.currentTerm = 5
 
+	// 1. Pre-Vote 阶段获取日志
+	mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil)
+	mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil)
+
+	// 2. 正式选举阶段
 	gomock.InOrder(
+		// 成为 Candidate
 		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: 1}).Return(nil),
+		// 获取日志
 		mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil),
 		mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil),
+		// 选举超时，退回 Follower
 		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: math.MaxUint64}).
 			Do(func(interface{}) { close(revertedToFollower) }).Return(nil),
 	)
 
-	for _, peerId := range peerIds {
-		mockTrans.EXPECT().SendRequestVote(strconv.Itoa(peerId), gomock.Any(), gomock.Any()).
-			DoAndReturn(func(id string, args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
+	// Mock RPCs
+	mockTrans.EXPECT().SendRequestVote(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(id string, args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
+			if args.PreVote {
+				// Pre-Vote 成功
+				reply.Term = args.Term
+				reply.VoteGranted = true
+			} else {
+				// 正式选举失败
 				reply.Term = args.Term
 				reply.VoteGranted = false
-				return nil
-			})
-	}
+			}
+			return nil
+		}).AnyTimes()
 
 	r.startElection()
 
@@ -169,7 +184,7 @@ func TestRequestVote_GrantsVote(t *testing.T) {
 		store:       mockStore,
 		mu:          sync.Mutex{},
 	}
-	args := param.NewRequestVoteArgs(5, 1, uint64(10), 5)
+	args := param.NewRequestVoteArgs(5, 1, uint64(10), 5, false)
 	reply := &param.RequestVoteReply{}
 
 	// --- 设置 Mock 期望 ---
@@ -218,7 +233,7 @@ func TestRequestVote_RejectsForStaleLog(t *testing.T) {
 		mu:          sync.Mutex{},
 	}
 	// 候选人日志只到索引 9，任期 5
-	args := param.NewRequestVoteArgs(5, 1, uint64(9), 5)
+	args := param.NewRequestVoteArgs(5, 1, uint64(9), 5, false)
 	reply := &param.RequestVoteReply{}
 
 	// --- 设置 Mock 期望 ---
@@ -242,7 +257,7 @@ func TestRequestVote_StepsDownOnHigherTerm(t *testing.T) {
 	mockStore := storage.NewMockStorage(ctrl)
 
 	r := &Raft{id: 2, currentTerm: 5, store: mockStore, mu: sync.Mutex{}}
-	args := param.NewRequestVoteArgs(6, 1, uint64(10), 5)
+	args := param.NewRequestVoteArgs(6, 1, uint64(10), 5, false)
 	reply := &param.RequestVoteReply{}
 
 	// --- 设置 Mock 期望 ---
@@ -277,27 +292,50 @@ func TestStartElection_StepsDownOnAppendEntries(t *testing.T) {
 	mockStore.EXPECT().GetState().Return(param.HardState{CurrentTerm: 5}, nil).Times(1)
 	r := NewRaft(1, peerIds, mockStore, nil, mockTrans, nil)
 	r.state = param.Follower
+	r.currentTerm = 5
+
+	candidateStateReached := make(chan struct{})
+
+	// 1. Pre-Vote 阶段获取日志
+	mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil)
+	mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil)
 
 	// 模拟选举开始
 	gomock.InOrder(
 		// 成为 Candidate，持久化状态
-		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: 1}).Return(nil),
+		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 6, VotedFor: 1}).Do(func(_ interface{}) {
+			close(candidateStateReached)
+		}).Return(nil),
 		// 获取日志信息
 		mockStore.EXPECT().LastLogIndex().Return(uint64(10), nil),
 		mockStore.EXPECT().GetEntry(uint64(10)).Return(&param.LogEntry{Term: 5, Index: 10}, nil),
+		// 期望收到 AE 后，调用 becomeFollower 持久化新状态
+		mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 7, VotedFor: math.MaxUint64}).Return(nil),
 	)
-	// 期望发出投票请求 (允许任意次数，因为可能在收到 AE 前发出)
-	mockTrans.EXPECT().SendRequestVote(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	// 期望发出投票请求 (Pre-Vote 成功)
+	mockTrans.EXPECT().SendRequestVote(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(id string, args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
+			if args.PreVote {
+				reply.Term = args.Term
+				reply.VoteGranted = true
+			}
+			return nil
+		}).AnyTimes()
 
 	// 启动选举过程
 	go r.startElection()
-	time.Sleep(5 * time.Millisecond) // 等待选举协程启动
+
+	// 等待进入 Candidate 状态
+	select {
+	case <-candidateStateReached:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for candidate state")
+	}
 
 	// 模拟收到来自更高任期 Leader 的 AppendEntries
 	argsAE := &param.AppendEntriesArgs{Term: 7, LeaderId: 2, PrevLogIndex: 0} // 任期为 7, PrevLogIndex: 0
 	replyAE := &param.AppendEntriesReply{}
-	// 期望收到 AE 后，调用 becomeFollower 持久化新状态
-	mockStore.EXPECT().SetState(param.HardState{CurrentTerm: 7, VotedFor: math.MaxUint64}).Return(nil)
 
 	err := r.AppendEntries(argsAE, replyAE)
 	assert.NoError(t, err)

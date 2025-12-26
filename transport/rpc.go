@@ -8,8 +8,11 @@ import (
 // 任何实现了这个接口的结构体都可以被 InMemoryTransport 注册和调用。
 type RPCServer interface {
 	RequestVote(args *param.RequestVoteArgs, reply *param.RequestVoteReply) error
+
 	AppendEntries(args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error
+
 	InstallSnapshot(args *param.InstallSnapshotArgs, reply *param.InstallSnapshotReply) error
+
 	ClientRequest(args *param.ClientArgs, reply *param.ClientReply) error
 }
 

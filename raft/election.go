@@ -29,22 +29,20 @@ type electionContext struct {
 }
 
 // newElectionContext 是 electionContext 的构造函数。
-// 它从 Raft 实例中获取当前选举所需的全部上下文信息。
 func newElectionContext(r *Raft) *electionContext {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// 复制当前配置，确保选举期间的计票逻辑不受外部状态变更的影响。
 	oldPeers := append([]int(nil), r.peerIds...)
 	newPeers := append([]int(nil), r.newPeerIds...)
-	oldPeers = append(oldPeers, r.id) // 将自身加入计票列表
+	oldPeers = append(oldPeers, r.id)
 
 	ctx := &electionContext{
 		inJoint:        r.inJointConsensus,
 		oldPeers:       oldPeers,
 		newPeers:       newPeers,
 		majorityOld:    len(oldPeers)/2 + 1,
-		votesOldConfig: 1, // 初始化计票器，首先计入自己的那一票。
+		votesOldConfig: 1, // 默认给自己投一票
 		votesNewConfig: 0,
 	}
 	if ctx.inJoint {
@@ -58,39 +56,64 @@ func newElectionContext(r *Raft) *electionContext {
 	return ctx
 }
 
-// startElection 主函数：发起选举并处理结果
-// 当一个 Follower 节点的选举计时器超时后，它会转变为 Candidate 状态并发起新一轮的选举。此函数负责：
-// - 增加 currentTerm（当前任期号）。
-// - 投票给自己 (votedFor = r.id)。
-// - 重置选举计时器。
-// - 向集群中的其他所有节点并行发送 RequestVote RPC（远程过程调用）来请求投票。
+// startElection 主函数：现在作为选举的入口，首先发起 Pre-Vote。
+// 只有 Pre-Vote 成功，才会触发正式选举 (startRealElection)。
 func (r *Raft) startElection() {
 	r.mu.Lock()
+	// 检查状态，只有 Follower 或 Candidate 可以发起选举
+	if r.state != param.Follower && r.state != param.Candidate {
+		r.mu.Unlock()
+		return
+	}
 
-	// 1. 初始化候选人状态：更新任期、投票给自己并持久化。
-	// 如果此步骤失败（例如持久化失败），则无法安全地进行选举。
+	// Pre-Vote 使用的任期是当前任期 + 1，但此时不修改 r.currentTerm
+	preVoteTerm := r.currentTerm + 1
+
+	// 获取日志信息用于比较
+	lastLogIndex, lastLogTerm, err := r.getLastLogInfoForElection()
+	if err != nil {
+		r.mu.Unlock()
+		return
+	}
+	r.mu.Unlock()
+
+	log.Printf("[PreVote] Node %d starting Pre-Vote for term %d", r.id, preVoteTerm)
+
+	// 发起 Pre-Vote 广播，注意最后一个参数 isPreVote = true
+	voteChan := r.broadcastVoteRequests(preVoteTerm, lastLogIndex, lastLogTerm, true)
+
+	// 异步处理 Pre-Vote 结果
+	go r.handleElectionResult(voteChan, preVoteTerm, true)
+}
+
+// startRealElection 发起真正的选举。
+// 只有在 Pre-Vote 阶段获得多数支持后，才会调用此方法。
+func (r *Raft) startRealElection() {
+	r.mu.Lock()
+
+	// 1. 初始化候选人状态：真正增加 currentTerm，投票给自己并持久化。
 	if err := r.initializeCandidateState(); err != nil {
 		r.mu.Unlock()
 		return
 	}
 
-	// 2. 获取用于投票请求的日志信息。
-	// 这是 Raft 安全性的一部分，确保日志旧的候选人无法当选。
+	// 2. 获取日志信息
 	lastLogIndex, lastLogTerm, err := r.getLastLogInfoForElection()
 	if err != nil {
 		r.mu.Unlock()
 		return
 	}
 
-	// 保存当前的选举任期，用于后续在处理投票结果时进行比较。
 	savedCurrentTerm := r.currentTerm
-	r.mu.Unlock() // 在发起网络调用前解锁。
+	r.mu.Unlock()
 
-	// 3. 并发地向所有对等节点广播投票请求。
-	voteChan := r.broadcastVoteRequests(savedCurrentTerm, lastLogIndex, lastLogTerm)
+	log.Printf("[Election] Node %d starting Real Election for term %d", r.id, savedCurrentTerm)
 
-	// 4. 在一个新的 goroutine 中异步处理选举结果。
-	go r.handleElectionResult(voteChan, savedCurrentTerm)
+	// 3. 广播正式投票请求，isPreVote = false
+	voteChan := r.broadcastVoteRequests(savedCurrentTerm, lastLogIndex, lastLogTerm, false)
+
+	// 4. 异步处理正式选举结果
+	go r.handleElectionResult(voteChan, savedCurrentTerm, false)
 }
 
 // RequestVote 是处理投票请求的 RPC 入口。
@@ -98,13 +121,62 @@ func (r *Raft) RequestVote(args *param.RequestVoteArgs, reply *param.RequestVote
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// 1. 处理任期相关的检查和状态更新。如果任期检查失败，则直接返回。
+	// --- Pre-Vote 特殊处理 ---
+	if args.PreVote {
+		return r.handlePreVote(args, reply)
+	}
+
+	// --- 正式 RequestVote 逻辑 ---
+
+	// 1. 处理任期相关的检查和状态更新。
 	if proceed, err := r.handleVoteTermLogic(args, reply); !proceed {
 		return err
 	}
 
-	// 2. 根据 Raft 的投票规则（日志新旧、是否已投票）做出最终决定。
+	// 2. 做出投票决定
 	return r.decideVote(args, reply)
+}
+
+// handlePreVote 处理预投票请求。
+// 预投票不改变接收者的 Term 或 VotedFor，主要检查 Leader 租约和日志新鲜度。
+func (r *Raft) handlePreVote(args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
+	reply.Term = r.currentTerm
+
+	// 1. 任期检查：PreVote 的 Term 必须大于当前 Term (或者至少能跟上)
+	// 如果 args.Term < r.currentTerm，显然是过时的
+	if args.Term < r.currentTerm {
+		reply.VoteGranted = false
+		return nil
+	}
+
+	// 2. 【关键】Leader 租约检查 (Sticky Leader)
+	// 如果在 electionTimeout 内收到过 Leader 的消息，说明集群健康，拒绝干扰。
+	if r.leaderHasLease() {
+		log.Printf("[PreVote] Node %d rejected PreVote from %d (Leader lease active)", r.id, args.CandidateId)
+		reply.VoteGranted = false
+		return nil
+	}
+
+	// 3. 日志新鲜度检查
+	isLogUpToDate, err := r.isLogUpToDate(args.LastLogIndex, args.LastLogTerm)
+	if err != nil {
+		return err
+	}
+
+	// 4. 授予预投票 (注意：这里不持久化 VotedFor，也不重置选举定时器)
+	if isLogUpToDate {
+		reply.VoteGranted = true
+		log.Printf("[PreVote] Node %d granted PreVote to %d for term %d", r.id, args.CandidateId, args.Term)
+	} else {
+		reply.VoteGranted = false
+	}
+	return nil
+}
+
+// leaderHasLease 检查当前节点是否持有有效的 Leader 租约。
+// 如果距离上次收到 Leader 心跳的时间小于最小选举超时时间，则认为 Leader 存活。
+func (r *Raft) leaderHasLease() bool {
+	return time.Since(r.electionResetEvent) < electionTimeout
 }
 
 // initializeCandidateState 负责将节点状态转换为 Candidate，更新任期，投票给自己，并持久化这些变更。
@@ -161,8 +233,7 @@ func (r *Raft) getLastLogInfoForElection() (lastLogIndex uint64, lastLogTerm uin
 
 // broadcastVoteRequests 负责向集群中所有其他节点并行地发送投票请求。
 // 它会返回一个 channel，用于接收投票结果。
-func (r *Raft) broadcastVoteRequests(term uint64, lastLogIndex uint64, lastLogTerm uint64) <-chan *param.VoteResult {
-	// 创建一个带缓冲的 channel 用于接收投票结果。
+func (r *Raft) broadcastVoteRequests(term uint64, lastLogIndex uint64, lastLogTerm uint64, isPreVote bool) <-chan *param.VoteResult {
 	voteChan := make(chan *param.VoteResult, len(r.getAllPeerIDs()))
 
 	// 并发地向集群中的所有其他节点发送投票请求。
@@ -172,8 +243,7 @@ func (r *Raft) broadcastVoteRequests(term uint64, lastLogIndex uint64, lastLogTe
 		if peerId == r.id {
 			continue
 		}
-
-		go r.sendVoteRequest(peerId, term, lastLogIndex, lastLogTerm, voteChan)
+		go r.sendVoteRequest(peerId, term, lastLogIndex, lastLogTerm, voteChan, isPreVote)
 	}
 	return voteChan
 }
@@ -182,7 +252,7 @@ func (r *Raft) broadcastVoteRequests(term uint64, lastLogIndex uint64, lastLogTe
 // 如果收到了超过半数节点的投票，则该 Candidate 节点成为 Leader。
 // 成为 Leader 后，会立即初始化 Leader 的状态（nextIndex 和 matchIndex）并开始发送心跳。
 // 如果在选举超时时间内未能获得多数票，选举失败，节点退回为 Follower 状态。
-func (r *Raft) handleElectionResult(voteChan <-chan *param.VoteResult, electionTerm uint64) {
+func (r *Raft) handleElectionResult(voteChan <-chan *param.VoteResult, electionTerm uint64, isPreVote bool) {
 	// 1. 初始化选举上下文。
 	ctx := newElectionContext(r)
 
@@ -194,18 +264,27 @@ func (r *Raft) handleElectionResult(voteChan <-chan *param.VoteResult, electionT
 	for {
 		select {
 		case <-r.shutdownChan:
-			log.Printf("[Election] Node %d shutting down election for term %d", r.id, electionTerm)
-			return // 收到停止信号，退出协程
+			return
 
 		case result := <-voteChan:
-			// 处理收到的投票。如果计票结果显示选举获胜，则转换状态并结束。
-			if r.processVote(ctx, result, electionTerm) { //
+			if r.processVote(ctx, result, electionTerm) {
+				// --- 选举获胜 ---
+				if isPreVote {
+					log.Printf("[PreVote] Node %d Pre-Vote passed for term %d. Starting Real Election.", r.id, electionTerm)
+					r.startRealElection() // Pre-Vote 成功，进入正式选举
+				} else {
+					r.transitionToLeader(electionTerm) // 正式选举成功，成为 Leader
+				}
 				return
 			}
 
 		case <-electionTimer.C:
-			// 处理选举超时。
-			r.handleElectionTimeout(electionTerm) //
+			// Pre-Vote 超时通常直接忽略，等待下一轮 ticker 触发即可
+			if !isPreVote {
+				r.handleElectionTimeout(electionTerm)
+			} else {
+				log.Printf("[PreVote] Node %d Pre-Vote failed/timed out for term %d.", r.id, electionTerm)
+			}
 			return
 		}
 	}
@@ -277,10 +356,10 @@ func (r *Raft) handleElectionTimeout(electionTerm uint64) {
 	}
 }
 
-// sendVoteRequest 向单个Peer发送投票请求
-// 请求，并处理响应。如果响应中包含更高的任期号，当前节点会立即更新自己的任期并转为 Follower。
-func (r *Raft) sendVoteRequest(peerId int, term uint64, lastLogIndex uint64, lastLogTerm uint64, voteChan chan<- *param.VoteResult) {
-	args := param.NewRequestVoteArgs(term, r.id, lastLogIndex, lastLogTerm)
+// sendVoteRequest 向单个Peer发送投票请求。
+// 新增 isPreVote 参数，并将其设置到 RPC Args 中。
+func (r *Raft) sendVoteRequest(peerId int, term uint64, lastLogIndex uint64, lastLogTerm uint64, voteChan chan<- *param.VoteResult, isPreVote bool) {
+	args := param.NewRequestVoteArgs(term, r.id, lastLogIndex, lastLogTerm, isPreVote)
 	reply := param.NewRequestVoteReply()
 
 	if err := r.trans.SendRequestVote(strconv.Itoa(peerId), args, reply); err != nil {
@@ -292,15 +371,21 @@ func (r *Raft) sendVoteRequest(peerId int, term uint64, lastLogIndex uint64, las
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// 如果收到更高term的响应，立即转为Follower
-	if reply.Term > r.currentTerm {
+	// 收到更高 Term 时的处理：
+	// 1. 如果是正式选举，必须立即转为 Follower。
+	// 2. 如果是 Pre-Vote，如果对方 Term 更高，意味着集群有更活跃的 Leader，也应该转为 Follower 更新 Term。
+	// 修正：如果 VoteGranted 为 true，说明对方认可我们的任期（即使是 Pre-Vote 的未来任期），不应视为发现更高任期。
+	// 只有在 VoteGranted 为 false 且 reply.Term > r.currentTerm 时，才需要退回。
+	// 对于 Pre-Vote，args.Term = r.currentTerm + 1。如果 reply.Term == args.Term 且 VoteGranted=true，这是好事。
+	if reply.Term > r.currentTerm && !reply.VoteGranted {
 		log.Printf("[Election] Node %d found higher term %d from peer %d, becomes Follower", r.id, reply.Term, peerId)
-		r.currentTerm = reply.Term
-		r.state = param.Follower
-		r.votedFor = -1
-		if err := r.store.SetState(param.HardState{CurrentTerm: r.currentTerm, VotedFor: uint64(r.votedFor)}); err != nil {
-			log.Printf("[ERROR] Node %d failed to persist state after finding higher term: %v", r.id, err)
+		// 注意：这里更新到 reply.Term
+		if err := r.becomeFollower(reply.Term); err != nil {
+			log.Printf("[ERROR] Node %d failed to persist state: %v", r.id, err)
 		}
+		// 即使 Pre-Vote 失败也返回，防止误判
+		voteChan <- &param.VoteResult{VoterID: peerId, VoteGranted: false}
+		return
 	}
 
 	voteChan <- &param.VoteResult{VoterID: peerId, VoteGranted: reply.VoteGranted}

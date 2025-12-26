@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"math/rand"
+	"strconv"
 	"sync"
 	"time"
 
@@ -45,7 +46,8 @@ type Raft struct {
 
 	// --- 快照相关 ---
 	// snapshot 在内存中持有当前最新的快照，避免频繁从存储中读取
-	snapshot *param.Snapshot
+	snapshot       *param.Snapshot
+	isSnapshotting bool // 标记是否正在后台生成快照
 
 	// --- 选举相关 ---
 	electionResetEvent     time.Time
@@ -184,64 +186,64 @@ func (r *Raft) ClientRequest(args *param.ClientArgs, reply *param.ClientReply) e
 		return r.handleLinearizableRead(cmd, reply)
 	}
 
-	// 7. 处理写请求（这是以前的逻辑）
 	return r.handleWriteRequest(args, reply)
 }
 
-// 8. 新增：handleLinearizableRead
 // handleLinearizableRead 处理只读请求，使用 ReadIndex 机制。
 func (r *Raft) handleLinearizableRead(cmd param.KVCommand, reply *param.ClientReply) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	// 1. 检查是否为 Leader
+	if r.state != param.Leader {
+		r.mu.Unlock()
+		reply.NotLeader = true
+		reply.LeaderHint = r.knownLeaderID
+		return nil
+	}
+
+	// 2. 记录 ReadIndex
+	// 按照 Raft 论文 Section 6.4，ReadIndex 应为当前的 commitIndex。
+	// 只要状态机应用到这个 index，就能保证线性一致性。
+	readIndex := r.commitIndex
+
+	// 为了不阻塞 Raft 锁，我们先释放锁去进行耗时的网络确认
+	r.mu.Unlock()
+
+	// 3. Heartbeat 确认 (Confirm Leadership)
+	// 向集群广播心跳，确保当前时刻自己依然拥有多数派支持。
+	// 这替代了原先依赖时钟的租约检查 (Lease Check)。
+	if !r.confirmLeadership() {
+		reply.Success = false
+		reply.NotLeader = true
+		// 确认失败意味着可能发生了网络分区或已有新 Leader，
+		// 建议客户端重试。
+		return nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// 重新加锁后再次检查状态，防止在确认期间被降级
 	if r.state != param.Leader {
 		reply.NotLeader = true
 		reply.LeaderHint = r.knownLeaderID
 		return nil
 	}
 
-	// 2. 检查领导权租约 (Lease Check)
-	// 计算在选举超时内响应的节点数
-	ackCount := 1 // 1. Leader 总是为自己“响应”
-	majority := (len(r.peerIds)+1)/2 + 1
-
-	for _, peerId := range r.peerIds {
-		if time.Since(r.lastAck[peerId]) < electionTimeout {
-			ackCount++
-		}
-	}
-
-	// 如果 Leader 没有得到大多数节点的及时响应，
-	// 它不确定自己是否仍然是 Leader，因此拒绝读取。
-	if ackCount < majority {
-		reply.Success = false
-		reply.NotLeader = true // 告诉客户端重试
-		reply.LeaderHint = r.knownLeaderID
-		log.Printf("[ReadIndex] Node %d lease check failed (acks: %d/%d), rejecting read.", r.id, ackCount, majority)
-		return nil
-	}
-
-	// 3. 租约有效，记录 ReadIndex
-	readIndex := r.commitIndex
-	log.Printf("[ReadIndex] Node %d lease check passed. ReadIndex set to %d. Waiting for lastApplied (%d)...", r.id, readIndex, r.lastApplied)
+	log.Printf("[ReadIndex] Node %d confirmed leadership. ReadIndex: %d. Waiting for lastApplied (%d)...", r.id, readIndex, r.lastApplied)
 
 	// 4. 等待状态机追赶上 ReadIndex
-	// 我们必须等待，直到 lastApplied >= readIndex
 	for r.lastApplied < readIndex {
-		// r.mu 锁被持有，Wait() 会自动释放它，
-		// 并在被唤醒时（通过 Broadcast）重新获取它。
 		r.lastAppliedCond.Wait()
 	}
 
 	// 5. 执行本地读取
-	// 此时, r.lastApplied >= readIndex, 状态机保证是线性的
-	log.Printf("[ReadIndex] Node %d lastApplied (%d) reached ReadIndex (%d). Performing local read.", r.id, r.lastApplied, readIndex)
+	log.Printf("[ReadIndex] Node %d state machine ready (lastApplied=%d). performing read.", r.id, r.lastApplied)
 
 	value, err := r.stateMachine.Get(cmd.Key)
 	if err != nil {
 		reply.Success = false
-		reply.Result = err.Error() // 例如 "key not found"
+		reply.Result = err.Error()
 	} else {
 		reply.Success = true
 		reply.Result = value
@@ -250,7 +252,97 @@ func (r *Raft) handleLinearizableRead(cmd param.KVCommand, reply *param.ClientRe
 	return nil
 }
 
-// 9. 新增：handleWriteRequest (从旧的 ClientRequest 逻辑中重构)
+// confirmLeadership 辅助方法：向所有节点发送轻量级心跳，并等待多数派确认。
+// 返回 true 表示确认成功（自己仍是 Leader）。
+func (r *Raft) confirmLeadership() bool {
+	r.mu.Lock()
+	term := r.currentTerm
+	leaderId := r.id
+	peerIds := r.getAllPeerIDs()
+
+	// 构造心跳请求列表
+	// 我们需要为每个 Peer 构造 args，为了避免在循环网络发送时持有锁，
+	// 我们先在锁内准备好所有数据。
+	type hbRequest struct {
+		peerId int
+		args   *param.AppendEntriesArgs
+	}
+	var requests []hbRequest
+
+	for _, pid := range peerIds {
+		if pid == r.id {
+			continue
+		}
+
+		// 尽量构造合法的 PrevLogIndex，虽然对于 Leadership 确认来说，
+		// 只要对方认可 Term 即可（即使 Log 不一致返回 false，只要 Term 没变也算确认）。
+		nextIdx, ok := r.nextIndex[pid]
+		if !ok || nextIdx == 0 {
+			// 防御性编程：如果 nextIndex 未初始化或为 0，避免下溢。
+			// 正常情况下 nextIndex 至少为 1 (FirstLogIndex)。
+			// 在测试中，如果手动构造 Raft 对象且未初始化 nextIndex，可能会触发此情况。
+			log.Printf("[WARNING] Node %d found invalid nextIndex for peer %d: %d. Defaulting to 1.", r.id, pid, nextIdx)
+			nextIdx = 1
+		}
+		prevLogIndex := nextIdx - 1
+		prevLogTerm, _ := r.getLogTerm(prevLogIndex) // 如果获取失败，默认为 0 也可以
+
+		// 构造空日志的 AppendEntries 作为心跳
+		args := param.NewAppendEntriesArgs(term, leaderId, prevLogIndex, prevLogTerm, r.commitIndex, nil)
+		requests = append(requests, hbRequest{pid, args})
+	}
+	r.mu.Unlock()
+
+	// 用于收集确认结果的通道
+	ackChan := make(chan bool, len(requests))
+
+	// 并行发送心跳
+	for _, req := range requests {
+		go func(target int, args *param.AppendEntriesArgs) {
+			reply := param.NewAppendEntriesReply()
+			// 发送 RPC
+			if err := r.trans.SendAppendEntries(strconv.Itoa(target), args, reply); err == nil {
+				// 关键判断：如果对方返回的 Term 与我们一致，说明对方认可我们的 Leadership。
+				// 即使 reply.Success 为 false (日志冲突)，也不影响 Leadership 的确认。
+				if reply.Term == term {
+					ackChan <- true
+				} else {
+					ackChan <- false
+				}
+			} else {
+				ackChan <- false
+			}
+		}(req.peerId, req.args)
+	}
+
+	// 统计票数
+	votes := 1 // 自己算一票
+	majority := (len(peerIds)+1)/2 + 1
+
+	// 设置一个较短的超时时间，避免读请求无限阻塞
+	// 通常取选举超时的一半或更短
+	timeout := time.After(electionTimeout / 2)
+
+	for i := 0; i < len(requests); i++ {
+		select {
+		case ok := <-ackChan:
+			if ok {
+				votes++
+			}
+		case <-timeout:
+			// 超时未集齐多数派
+			log.Printf("[ReadIndex] Node %d timed out waiting for heartbeat quorum.", leaderId)
+			return false
+		}
+
+		if votes >= majority {
+			return true
+		}
+	}
+
+	return false
+}
+
 // handleWriteRequest 处理写请求（通过 Raft 日志）。
 func (r *Raft) handleWriteRequest(args *param.ClientArgs, reply *param.ClientReply) error {
 	// 1. 执行前置检查。如果不是 Leader 或请求重复，则提前返回。
@@ -345,6 +437,7 @@ func (r *Raft) Commit(command interface{}) (any, bool, int) {
 	}
 
 	// 等待命令被状态机成功应用，或等待超时。
+	log.Printf("[Client] Waiting for log index %d to be applied...", index)
 	result, ok := r.waitForAppliedLog(index, 2*time.Second)
 	return result, ok, r.id
 }
@@ -480,31 +573,40 @@ func (r *Raft) becomeFollower(newTerm uint64) error {
 func (r *Raft) waitForAppliedLog(index uint64, timeout time.Duration) (any, bool) {
 	r.mu.Lock()
 
-	// 检查日志是否在“注册通知”之前就已经被应用了。
-	// 这是为了防止在 Commit 和 waitForAppliedLog 之间的
-	// 极短时间内，applyLogs 协程就已运行完毕导致的竞态。
+	// 1. 第一次检查：如果日志已经应用，直接返回。
 	if r.lastApplied >= index {
 		r.mu.Unlock()
-		// 日志已应用。对于写操作，我们通常返回 nil, true。
 		return nil, true
 	}
 
-	// 创建一个通知 channel，并注册到 map 中。
+	// 2. 注册通知 channel。
 	notifyChan := make(chan any, 1)
 	r.notifyApply[index] = notifyChan
+
+	// 3. 再次检查：防止在注册期间日志被应用。
+	if r.lastApplied >= index {
+		// 如果此时发现已经应用了，清理刚刚注册的 channel 并返回。
+		delete(r.notifyApply, index)
+		r.mu.Unlock()
+		return nil, true
+	}
+
 	r.mu.Unlock()
 
-	// 等待 applyLogs 发出通知，或等待超时。
+	// 4. 无论等待成功还是超时，最后都负责清理 channel。
+	defer func() {
+		r.mu.Lock()
+		delete(r.notifyApply, index)
+		r.mu.Unlock()
+	}()
+
+	// 5. 等待 applyLogs 发出通知，或等待超时。
 	select {
 	case result := <-notifyChan:
 		log.Printf("[Client] Notified that log index %d has been applied.", index)
 		return result, true
 	case <-time.After(timeout):
 		log.Printf("[Client] Timed out waiting for log index %d to be applied.", index)
-		// 超时后，需要清理掉注册的 channel 以防内存泄漏。
-		r.mu.Lock()
-		delete(r.notifyApply, index)
-		r.mu.Unlock()
 		return nil, false
 	}
 }
