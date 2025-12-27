@@ -13,6 +13,7 @@ type Transport struct {
 	mu        sync.RWMutex
 	localAddr string                         // 本地节点的地址
 	peers     map[string]transport.RPCServer // 存储集群中其他节点的引用
+	raft      transport.RPCServer
 }
 
 // NewInMemoryTransport 创建一个新的 Transport 实例。
@@ -22,6 +23,34 @@ func NewInMemoryTransport(addr string) *Transport {
 		localAddr: addr,
 		peers:     make(map[string]transport.RPCServer),
 	}
+}
+
+// Addr 返回当前 Transport 监听的实际地址。
+func (t *Transport) Addr() string {
+	return t.localAddr
+}
+
+// SetPeers 设置节点 ID 到地址的映射。
+// 在 InMemoryTransport 中，我们通常使用 Connect 方法手动连接，
+// 但为了满足 Transport 接口，我们提供一个空实现或简单的实现。
+// 在测试中，我们通常手动调用 Connect 来建立“连接”。
+func (t *Transport) SetPeers(peers map[int]string) {
+	// InMemoryTransport 通常在测试中手动配置连接
+}
+
+// RegisterRaft 注册 Raft 实例。
+func (t *Transport) RegisterRaft(raftInstance transport.RPCServer) {
+	t.raft = raftInstance
+}
+
+// Start 启动 Transport。
+func (t *Transport) Start() error {
+	return nil
+}
+
+// Close 关闭 Transport。
+func (t *Transport) Close() error {
+	return nil
 }
 
 // Connect 将一个节点（peer）添加到 transport 的注册表中。

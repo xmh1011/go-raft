@@ -34,6 +34,46 @@ func (m *MockTransport) EXPECT() *MockTransportMockRecorder {
 	return m.recorder
 }
 
+// Addr mocks base method.
+func (m *MockTransport) Addr() string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Addr")
+	ret0, _ := ret[0].(string)
+	return ret0
+}
+
+// Addr indicates an expected call of Addr.
+func (mr *MockTransportMockRecorder) Addr() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Addr", reflect.TypeOf((*MockTransport)(nil).Addr))
+}
+
+// Close mocks base method.
+func (m *MockTransport) Close() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Close")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Close indicates an expected call of Close.
+func (mr *MockTransportMockRecorder) Close() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockTransport)(nil).Close))
+}
+
+// RegisterRaft mocks base method.
+func (m *MockTransport) RegisterRaft(raftInstance RPCServer) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "RegisterRaft", raftInstance)
+}
+
+// RegisterRaft indicates an expected call of RegisterRaft.
+func (mr *MockTransportMockRecorder) RegisterRaft(raftInstance any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RegisterRaft", reflect.TypeOf((*MockTransport)(nil).RegisterRaft), raftInstance)
+}
+
 // SendAppendEntries mocks base method.
 func (m *MockTransport) SendAppendEntries(target string, req *param.AppendEntriesArgs, resp *param.AppendEntriesReply) error {
 	m.ctrl.T.Helper()
@@ -88,4 +128,30 @@ func (m *MockTransport) SendRequestVote(target string, req *param.RequestVoteArg
 func (mr *MockTransportMockRecorder) SendRequestVote(target, req, resp any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendRequestVote", reflect.TypeOf((*MockTransport)(nil).SendRequestVote), target, req, resp)
+}
+
+// SetPeers mocks base method.
+func (m *MockTransport) SetPeers(peers map[int]string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetPeers", peers)
+}
+
+// SetPeers indicates an expected call of SetPeers.
+func (mr *MockTransportMockRecorder) SetPeers(peers any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetPeers", reflect.TypeOf((*MockTransport)(nil).SetPeers), peers)
+}
+
+// Start mocks base method.
+func (m *MockTransport) Start() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Start")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Start indicates an expected call of Start.
+func (mr *MockTransportMockRecorder) Start() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Start", reflect.TypeOf((*MockTransport)(nil).Start))
 }

@@ -12,7 +12,7 @@ CLIENT_CMD_PATH=./cmd/client
 
 # --- Targets ---
 
-.PHONY: all deps build test integration-test cover install-mockgen mockgen clean help cluster stop-cluster
+.PHONY: all deps build test integration-test cover install-mockgen mockgen clean help cluster stop-cluster proto install-protoc-gen
 
 .DEFAULT_GOAL := help
 
@@ -60,6 +60,18 @@ install-mockgen:
 mockgen:
 	mockgen -source=storage/storage.go -destination=storage/storage_mock.go -package=storage
 	mockgen -source=transport/transport.go -destination=transport/transport_mock.go -package=transport
+
+install-protoc-gen:
+	@echo "Installing protoc-gen-go and protoc-gen-go-grpc..."
+	@go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+	@go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+## proto: Generate gRPC code from proto files.
+proto: install-protoc-gen
+	@echo " generating gRPC code..."
+	@protoc --go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		transport/grpc/pb/raft.proto
 
 ## cluster: Start a 3-node local cluster.
 cluster: build

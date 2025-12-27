@@ -42,7 +42,7 @@ Go-Raft 是一个用 Go 语言编写的 Raft 分布式共识算法的实现。�
 负责节点之间的网络通信。
 *   定义了 `Transport` 接口，使得底层网络实现可以替换。
 *   **`tcp/`**: 基于 Go 标准库 `net/rpc` 实现的 TCP 传输层。
-*   解决了 Raft 实例与 Transport 实例之间的循环依赖问题（先创建 Transport，再注册 Raft）。
+*   **`grpc/`**: 基于 gRPC 实现的传输层。
 
 ### 3. 存储层 (`storage/`)
 负责持久化 Raft 的状态和日志。
@@ -59,6 +59,7 @@ Go-Raft 是一个用 Go 语言编写的 Raft 分布式共识算法的实现。�
 ### 环境要求
 *   Go 1.24+
 *   Make (可选)
+*   Protoc (如果需要重新生成 gRPC 代码)
 
 ### 编译
 
