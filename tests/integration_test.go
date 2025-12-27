@@ -13,43 +13,55 @@ import (
 	"github.com/xmh1011/go-raft/param"
 	"github.com/xmh1011/go-raft/raft"
 	"github.com/xmh1011/go-raft/storage/inmemory"
+	"github.com/xmh1011/go-raft/transport"
+	"github.com/xmh1011/go-raft/transport/grpc"
 	"github.com/xmh1011/go-raft/transport/tcp"
 )
 
 // cluster 封装了测试集群的组件
 type cluster struct {
 	nodes         []*raft.Raft
-	transports    []*tcp.Transport
+	transports    []transport.Transport
 	stateMachines []*inmemory.StateMachine
 	storages      []*inmemory.Storage
 	commitChans   []chan param.CommitEntry
 	peerMap       map[int]string
+	transportType string
 }
 
 // newCluster 创建并启动一个新的测试集群
 // 它只是 newClusterWithConfig 的一个特例：物理节点数 = 初始配置节点数
 func newCluster(t *testing.T, nodeCount int) *cluster {
-	return newClusterWithConfig(t, nodeCount, nodeCount)
+	return newClusterWithConfig(t, nodeCount, nodeCount, "tcp")
 }
 
 // newClusterWithConfig 是核心构建函数
 // totalNodes: 物理启动的节点总数 (例如 5 个，对应 Transport 和 Storage)
 // initialConfigSize: 初始 Raft 配置中的节点数 (例如 3 个，即 Node 1,2,3 在集群配置中)
-func newClusterWithConfig(t *testing.T, totalNodes int, initialConfigSize int) *cluster {
+func newClusterWithConfig(t *testing.T, totalNodes int, initialConfigSize int, transportType string) *cluster {
 	c := &cluster{
 		nodes:         make([]*raft.Raft, totalNodes),
-		transports:    make([]*tcp.Transport, totalNodes),
+		transports:    make([]transport.Transport, totalNodes),
 		stateMachines: make([]*inmemory.StateMachine, totalNodes),
 		storages:      make([]*inmemory.Storage, totalNodes),
 		commitChans:   make([]chan param.CommitEntry, totalNodes),
 		peerMap:       make(map[int]string),
+		transportType: transportType,
 	}
 
 	// 1. 初始化所有节点的 Transport (物理网络全通)
 	// 无论是初始节点还是待加入的节点，都需要有网络地址
 	for i := 0; i < totalNodes; i++ {
 		id := i + 1
-		trans, err := tcp.NewTCPTransport("127.0.0.1:0")
+		var trans transport.Transport
+		var err error
+
+		if transportType == "grpc" {
+			trans, err = grpc.NewTransport("127.0.0.1:0")
+		} else {
+			trans, err = tcp.NewTCPTransport("127.0.0.1:0")
+		}
+
 		if err != nil {
 			t.Fatalf("failed to create transport for node %d: %v", id, err)
 		}
@@ -157,7 +169,15 @@ func (c *cluster) restartNode(t *testing.T, nodeIndex int) {
 	// 2. 创建新的 Transport (模拟进程重启，端口重新绑定)
 	// 注意：这里必须复用之前的地址，否则 Peer 找不到它
 	prevAddr := c.peerMap[id]
-	newTrans, err := tcp.NewTCPTransport(prevAddr)
+	var newTrans transport.Transport
+	var err error
+
+	if c.transportType == "grpc" {
+		newTrans, err = grpc.NewTransport(prevAddr)
+	} else {
+		newTrans, err = tcp.NewTCPTransport(prevAddr)
+	}
+
 	if err != nil {
 		t.Fatalf("failed to recreate transport for node %d: %v", id, err)
 	}
@@ -781,6 +801,15 @@ func TestCluster_UnreliableNetwork_Churn(t *testing.T) {
 		c.transports[i].SetPeers(c.peerMap)
 	}
 
+	// 确保有一个新的 Leader 并写入一条日志，以强制覆盖所有 Follower 的未提交日志
+	// 这是因为 Raft 不会自动删除 Follower 尾部的多余日志，除非有新日志覆盖它
+	time.Sleep(2 * time.Second)
+	finalLeader := c.getLeader(t)
+	t.Logf("Proposing final barrier entry on Leader %d", finalLeader.ID())
+	barrierCmd, _ := json.Marshal(param.KVCommand{Op: "set", Key: "barrier", Value: "final"})
+	err := finalLeader.ClientRequest(&param.ClientArgs{ClientID: 9999, SequenceNum: 1, Command: barrierCmd}, &param.ClientReply{})
+	assert.NoError(t, err)
+
 	// 给足够的时间让日志复制完成，并让落后的节点截断脏日志
 	time.Sleep(5 * time.Second)
 
@@ -844,7 +873,7 @@ func TestCluster_UnreliableNetwork_Churn(t *testing.T) {
 func TestCluster_MembershipChange(t *testing.T) {
 	// 启动 5 个物理节点，但 Raft 初始只包含 [1, 2, 3]
 	// 节点 4 和 5 处于运行状态，但不在集群配置中
-	c := newClusterWithConfig(t, 5, 3)
+	c := newClusterWithConfig(t, 5, 3, "tcp")
 	defer c.shutdown()
 
 	leader := c.getLeader(t)
@@ -966,7 +995,12 @@ func TestCluster_FullClusterRestart(t *testing.T) {
 		id := i + 1
 		prevAddr := c.peerMap[id]
 
-		newTrans, _ := tcp.NewTCPTransport(prevAddr)
+		var newTrans transport.Transport
+		if c.transportType == "grpc" {
+			newTrans, _ = grpc.NewTransport(prevAddr)
+		} else {
+			newTrans, _ = tcp.NewTCPTransport(prevAddr)
+		}
 		c.transports[i] = newTrans
 
 		// 复用存储和状态机
@@ -1060,5 +1094,35 @@ func TestCluster_StaleRead(t *testing.T) {
 		assert.False(t, reply.Success, "Old leader should not respond to read requests.")
 	case <-time.After(2 * time.Second):
 		t.Log("Pass: Old leader timed out (likely stuck in ReadIndex check).")
+	}
+}
+
+// TestCluster_GRPC_ElectionAndReplication 测试 gRPC 传输层的基本选举和日志复制
+func TestCluster_GRPC_ElectionAndReplication(t *testing.T) {
+	c := newClusterWithConfig(t, 3, 3, "grpc")
+	defer c.shutdown()
+
+	leader := c.getLeader(t)
+	t.Logf("Leader elected: Node %d", leader.ID())
+
+	// 发送写请求
+	key := "test-key-grpc"
+	value := "test-value-grpc"
+	cmd := param.KVCommand{Op: "set", Key: key, Value: value}
+	cmdBytes, _ := json.Marshal(cmd)
+
+	clientArgs := &param.ClientArgs{ClientID: 999, SequenceNum: 1, Command: cmdBytes}
+	clientReply := &param.ClientReply{}
+
+	err := leader.ClientRequest(clientArgs, clientReply)
+	assert.NoError(t, err)
+	assert.True(t, clientReply.Success)
+
+	// 验证一致性
+	time.Sleep(1 * time.Second)
+	for i := 0; i < 3; i++ {
+		val, err := c.stateMachines[i].Get(key)
+		assert.NoError(t, err)
+		assert.Equal(t, value, val)
 	}
 }

@@ -13,13 +13,16 @@ import (
 	"github.com/xmh1011/go-raft/param"
 	"github.com/xmh1011/go-raft/raft"
 	"github.com/xmh1011/go-raft/storage/inmemory"
+	"github.com/xmh1011/go-raft/transport"
+	"github.com/xmh1011/go-raft/transport/grpc"
 	"github.com/xmh1011/go-raft/transport/tcp"
 )
 
 var (
-	nodeID   int
-	peersStr string
-	dataDir  string
+	nodeID        int
+	peersStr      string
+	dataDir       string
+	transportType string
 )
 
 func main() {
@@ -32,6 +35,7 @@ func main() {
 	rootCmd.Flags().IntVar(&nodeID, "id", 1, "Node ID")
 	rootCmd.Flags().StringVar(&peersStr, "peers", "1=127.0.0.1:8001,2=127.0.0.1:8002,3=127.0.0.1:8003", "Comma-separated list of peer ID=Address pairs")
 	rootCmd.Flags().StringVar(&dataDir, "data", "raft-data", "Directory to store raft data")
+	rootCmd.Flags().StringVar(&transportType, "transport", "tcp", "Transport type: tcp or grpc")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -72,9 +76,20 @@ func runServer(cmd *cobra.Command, args []string) {
 	stateMachine := inmemory.NewInMemoryStateMachine()
 
 	// 3. 初始化网络传输 (第一阶段：仅创建实例并监听端口)
-	trans, err := tcp.NewTCPTransport(myAddr)
+	var trans transport.Transport
+	var err error
+
+	switch transportType {
+	case "tcp":
+		trans, err = tcp.NewTCPTransport(myAddr)
+	case "grpc":
+		trans, err = grpc.NewTransport(myAddr)
+	default:
+		log.Fatalf("Unknown transport type: %s", transportType)
+	}
+
 	if err != nil {
-		log.Fatalf("Failed to create TCP transport: %v", err)
+		log.Fatalf("Failed to create transport: %v", err)
 	}
 	// 设置集群节点地址映射
 	trans.SetPeers(peerMap)
@@ -90,7 +105,7 @@ func runServer(cmd *cobra.Command, args []string) {
 
 	// 启动网络服务
 	go func() {
-		log.Printf("Starting TCP transport service on %s", myAddr)
+		log.Printf("Starting %s transport service on %s", transportType, myAddr)
 		if err := trans.Start(); err != nil {
 			log.Fatalf("Failed to start transport service: %v", err)
 		}
