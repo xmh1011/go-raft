@@ -1,7 +1,9 @@
-package inmemory
+package simplefile
 
 import (
+	"encoding/gob"
 	"errors"
+	"os"
 	"sync"
 
 	"github.com/xmh1011/go-raft/param"
@@ -12,39 +14,103 @@ var (
 	ErrIndexOutOfBounds = errors.New("index is out of bounds")
 )
 
-// Storage 是 Storage 接口的一个线程安全的内存实现，主要用于测试。
+// Storage implements a simple file-based storage.
+// It persists the entire state to a file on every write operation using encoding/gob.
+// This is a simple alternative to LSM trees or B-Trees, suitable for small datasets or educational purposes.
 type Storage struct {
-	mu sync.RWMutex
+	mu       sync.RWMutex
+	filePath string
 
-	// HardState (term, votedFor)
+	// In-memory cache of the state
 	hardState param.HardState
-
-	// Snapshot
-	snapshot *param.Snapshot
-
-	// Log entries
-	// 为了处理日志压缩，我们使用一个偏移量来记录第一个日志条目的实际 Raft 索引。
-	// log[0] 的真实索引是 logOffset。
+	snapshot  *param.Snapshot
 	log       []param.LogEntry
 	logOffset uint64
 }
 
-// NewStorage 创建一个新的内存存储实例。
-func NewStorage() *Storage {
-	s := &Storage{
-		log:       make([]param.LogEntry, 1), // 日志索引从1开始，所以log[0]是一个哑元
-		logOffset: 0,
-	}
-	return s
+// persistentData is the structure used for serialization.
+type persistentData struct {
+	HardState param.HardState
+	Snapshot  *param.Snapshot
+	Log       []param.LogEntry
+	LogOffset uint64
 }
 
-// --- HardState 操作 ---
+// NewStorage creates a new simple file storage.
+func NewStorage(filePath string) (*Storage, error) {
+	s := &Storage{
+		filePath:  filePath,
+		log:       make([]param.LogEntry, 1), // log[0] is dummy
+		logOffset: 0,
+	}
+
+	if err := s.load(); err != nil {
+		// If file does not exist, initialize it
+		if os.IsNotExist(err) {
+			if err := s.persist(); err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
+	}
+	return s, nil
+}
+
+func (s *Storage) load() error {
+	f, err := os.Open(s.filePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var data persistentData
+	if err := gob.NewDecoder(f).Decode(&data); err != nil {
+		return err
+	}
+
+	s.hardState = data.HardState
+	s.snapshot = data.Snapshot
+	s.log = data.Log
+	s.logOffset = data.LogOffset
+	return nil
+}
+
+func (s *Storage) persist() error {
+	data := persistentData{
+		HardState: s.hardState,
+		Snapshot:  s.snapshot,
+		Log:       s.log,
+		LogOffset: s.logOffset,
+	}
+
+	// Write to temp file and rename for atomicity
+	tmpPath := s.filePath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+
+	encoder := gob.NewEncoder(f)
+	if err := encoder.Encode(data); err != nil {
+		f.Close()
+		return err
+	}
+
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpPath, s.filePath)
+}
+
+// --- HardState Operations ---
 
 func (s *Storage) SetState(state param.HardState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hardState = state
-	return nil
+	return s.persist()
 }
 
 func (s *Storage) GetState() (param.HardState, error) {
@@ -53,25 +119,23 @@ func (s *Storage) GetState() (param.HardState, error) {
 	return s.hardState, nil
 }
 
-// --- 日志条目操作 ---
+// --- Log Entry Operations ---
 
 func (s *Storage) AppendEntries(entries []param.LogEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.log = append(s.log, entries...)
-	return nil
+	return s.persist()
 }
 
 func (s *Storage) GetEntry(index uint64) (*param.LogEntry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// 检查索引是否在当前日志范围内
 	if index < s.logOffset+1 || index >= s.logOffset+uint64(len(s.log)) {
 		return nil, ErrLogNotFound
 	}
 
-	// index 对应的切片位置是 index - logOffset
 	return &s.log[index-s.logOffset], nil
 }
 
@@ -83,20 +147,18 @@ func (s *Storage) TruncateLog(fromIndex uint64) error {
 		return ErrIndexOutOfBounds
 	}
 	if fromIndex >= s.logOffset+uint64(len(s.log)) {
-		// 如果索引超出当前日志范围，无需截断
 		return nil
 	}
 
 	s.log = s.log[:fromIndex-s.logOffset]
-	return nil
+	return s.persist()
 }
 
-// --- 日志元数据操作 ---
+// --- Log Metadata Operations ---
 
 func (s *Storage) FirstLogIndex() (uint64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	// 真实的第一个日志索引是偏移量+1
 	return s.logOffset + 1, nil
 }
 
@@ -112,13 +174,13 @@ func (s *Storage) LogSize() (int, error) {
 	return len(s.log), nil
 }
 
-// --- 快照操作 ---
+// --- Snapshot Operations ---
 
 func (s *Storage) SaveSnapshot(snapshot *param.Snapshot) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snapshot = snapshot
-	return nil
+	return s.persist()
 }
 
 func (s *Storage) ReadSnapshot() (*param.Snapshot, error) {
@@ -140,22 +202,15 @@ func (s *Storage) CompactLog(upToIndex uint64) error {
 		return ErrIndexOutOfBounds
 	}
 
-	// 计算要丢弃的日志数量。
-	// upToIndex 对应的切片索引是 upToIndex - s.logOffset。
-	// 我们要保留这之后的所有条目，所以新切片从 (upToIndex - s.logOffset) + 1 开始。
 	sliceIndexToKeep := upToIndex - s.logOffset + 1
-
-	// 创建一个包含新哑元条目的日志
 	newLog := make([]param.LogEntry, 1, 1+len(s.log)-int(sliceIndexToKeep))
 	newLog = append(newLog, s.log[sliceIndexToKeep:]...)
 
 	s.log = newLog
-	// 新的偏移量是最后一个被包含在快照中的索引
 	s.logOffset = upToIndex
-	return nil
+	return s.persist()
 }
 
-// Close 在内存实现中通常是无操作的。
 func (s *Storage) Close() error {
 	return nil
 }

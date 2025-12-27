@@ -10,7 +10,7 @@ import (
 	"github.com/xmh1011/go-raft/param"
 )
 
-// mockRPCServer 是 transport.RPCServer 接口的一个模拟实现，用于测试。
+// mockRPCServer 是 raft.RaftRPC 接口的一个模拟实现，用于测试。
 type mockRPCServer struct {
 	lastArgs      any
 	replyToReturn any
@@ -57,7 +57,7 @@ func TestTCPTransport(t *testing.T) {
 		mockPeer.replyToReturn = &param.RequestVoteReply{Term: 1, VoteGranted: true}
 
 		// 在 "localhost:0" 上监听，让系统自动选择一个可用端口
-		transPeer, err := NewTCPTransport("localhost:0")
+		transPeer, err := NewTransport("localhost:0")
 		assert.NoError(t, err)
 		defer transPeer.Close() // 确保测试结束后关闭监听器
 
@@ -70,7 +70,7 @@ func TestTCPTransport(t *testing.T) {
 
 		// --- 设置 Local (RPC 客户端) ---
 		// 本地 transport 实际上在此测试中不需要监听，但我们仍完整创建它
-		transLocal, err := NewTCPTransport("localhost:0")
+		transLocal, err := NewTransport("localhost:0")
 		assert.NoError(t, err)
 		defer transLocal.Close()
 
@@ -96,7 +96,7 @@ func TestTCPTransport(t *testing.T) {
 	})
 
 	t.Run("Dial non-existent server", func(t *testing.T) {
-		transLocal, err := NewTCPTransport("localhost:0")
+		transLocal, err := NewTransport("localhost:0")
 		assert.NoError(t, err)
 		defer transLocal.Close()
 
@@ -113,7 +113,7 @@ func TestTCPTransport(t *testing.T) {
 
 	t.Run("Client connection caching", func(t *testing.T) {
 		mockPeer := &mockRPCServer{}
-		transPeer, err := NewTCPTransport("localhost:0")
+		transPeer, err := NewTransport("localhost:0")
 		assert.NoError(t, err)
 		defer transPeer.Close()
 
@@ -123,7 +123,7 @@ func TestTCPTransport(t *testing.T) {
 
 		peerAddr := transPeer.listener.Addr().String()
 
-		transLocal, err := NewTCPTransport("localhost:0")
+		transLocal, err := NewTransport("localhost:0")
 		assert.NoError(t, err)
 		defer transLocal.Close()
 
@@ -145,7 +145,7 @@ func TestTCPTransport(t *testing.T) {
 		expectedErr := errors.New("a deliberate error from peer")
 		mockPeer.errorToReturn = expectedErr
 
-		transPeer, err := NewTCPTransport("localhost:0")
+		transPeer, err := NewTransport("localhost:0")
 		assert.NoError(t, err)
 		defer transPeer.Close()
 
@@ -155,7 +155,7 @@ func TestTCPTransport(t *testing.T) {
 
 		peerAddr := transPeer.listener.Addr().String()
 
-		transLocal, err := NewTCPTransport("localhost:0")
+		transLocal, err := NewTransport("localhost:0")
 		assert.NoError(t, err)
 		defer transLocal.Close()
 
@@ -169,7 +169,7 @@ func TestTCPTransport(t *testing.T) {
 	})
 
 	t.Run("Close listener", func(t *testing.T) {
-		trans, err := NewTCPTransport("localhost:0")
+		trans, err := NewTransport("localhost:0")
 		assert.NoError(t, err)
 		trans.RegisterRaft(&mockRPCServer{})
 		trans.Start()
@@ -182,7 +182,7 @@ func TestTCPTransport(t *testing.T) {
 		// 稍等片刻以确保端口已释放或连接会立即失败
 		time.Sleep(50 * time.Millisecond)
 
-		trans2, err := NewTCPTransport("localhost:0")
+		trans2, err := NewTransport("localhost:0")
 		assert.NoError(t, err)
 		defer trans2.Close()
 

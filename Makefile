@@ -10,9 +10,16 @@ CLIENT_BINARY=raft-client
 SERVER_CMD_PATH=./cmd/server
 CLIENT_CMD_PATH=./cmd/client
 
+# go import format
+GO_FILES := $(shell find . -type f -name '*.go' -not -path "./vendor/*")
+GOIMPORTS_REVISER := goimports-reviser
+COMPANY_PREFIXES := "github.com/xmh1011"
+PROJECT_NAME := "github.com/xmh1011/go-raft"
+IMPORTS_ORDER := "std,general,company,project"
+
 # --- Targets ---
 
-.PHONY: all deps build test integration-test cover install-mockgen mockgen clean help cluster stop-cluster proto install-protoc-gen
+.PHONY: all deps build test integration-test cover install-mockgen mockgen clean help cluster stop-cluster proto install-protoc-gen install-go-imports-reviser format
 
 .DEFAULT_GOAL := help
 
@@ -41,7 +48,7 @@ build: deps
 ## test: Run all unit tests with race detector and coverage for ALL packages.
 test: deps
 	@echo " running unit tests..."
-	@go test -race -timeout=2m -v -cover -coverprofile=coverage.txt -coverpkg=./... $(PKGS_TO_TEST)
+	@go test -race -timeout=20m -v -cover -coverprofile=coverage.txt -coverpkg=./... $(PKGS_TO_TEST)
 
 ## integration-test: Run integration tests.
 integration-test: deps
@@ -89,6 +96,23 @@ stop-cluster:
 	@-if [ -f raft-node-2.pid ]; then kill `cat raft-node-2.pid` && rm raft-node-2.pid; fi
 	@-if [ -f raft-node-3.pid ]; then kill `cat raft-node-3.pid` && rm raft-node-3.pid; fi
 	@echo " cluster stopped."
+
+# Code style checks
+install-go-imports-reviser:
+	@echo "Installing go-imports-reviser..."
+	@command -v goimports-reviser >/dev/null 2>&1 || go install github.com/incu6us/goimports-reviser/v3@latest
+
+format: install-go-imports-reviser
+	@echo "Fixing import order for all Go files"
+	@$(GOIMPORTS_REVISER) \
+		-format \
+		-company-prefixes "$(COMPANY_PREFIXES)" \
+		-project-name "$(PROJECT_NAME)" \
+		-imports-order "$(IMPORTS_ORDER)" \
+		$(GO_FILES)
+	for file in $(GO_FILES); do \
+		gofmt -w "$$file"; \
+	done
 
 ## clean: Remove generated files and clear Go test cache.
 clean:

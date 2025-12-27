@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
 	"github.com/xmh1011/go-raft/param"
 )
 
@@ -19,8 +20,8 @@ func newTestEntries(start, end uint64) []param.LogEntry {
 
 func TestStorage(t *testing.T) {
 	t.Run("Initial State", func(t *testing.T) {
-		s := NewInMemoryStorage()
-		assert.NotNil(t, s, "NewInMemoryStorage should not return nil")
+		s := NewStorage()
+		assert.NotNil(t, s, "NewStorage should not return nil")
 
 		lastIdx, err := s.LastLogIndex()
 		assert.NoError(t, err, "LastLogIndex() should not fail")
@@ -34,7 +35,7 @@ func TestStorage(t *testing.T) {
 		assert.ErrorIs(t, err, ErrLogNotFound, "should return ErrLogNotFound for initial empty log")
 	})
 	t.Run("HardState", func(t *testing.T) {
-		s := NewInMemoryStorage()
+		s := NewStorage()
 		initialState, err := s.GetState()
 		assert.NoError(t, err, "GetState() should not fail")
 		assert.Equal(t, uint64(0), initialState.CurrentTerm, "initial CurrentTerm should be 0")
@@ -49,7 +50,7 @@ func TestStorage(t *testing.T) {
 		assert.Equal(t, newState, retrievedState, "retrieved state should match set state")
 	})
 	t.Run("Log Operations (Append, Get, Truncate)", func(t *testing.T) {
-		s := NewInMemoryStorage()
+		s := NewStorage()
 		entries := newTestEntries(1, 5) // Creates entries with Index/Term 1, 2, 3, 4, 5
 
 		err := s.AppendEntries(entries)
@@ -92,7 +93,7 @@ func TestStorage(t *testing.T) {
 	})
 
 	t.Run("Snapshot and Compaction", func(t *testing.T) {
-		s := NewInMemoryStorage()
+		s := NewStorage()
 		entries := newTestEntries(1, 10)
 		s.AppendEntries(entries)
 
