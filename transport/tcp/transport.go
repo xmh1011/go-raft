@@ -173,6 +173,7 @@ func (t *Transport) getPeerClient(targetID string) (*rpc.Client, error) {
 		return client, nil
 	}
 
+	log.Printf("[TCPTransport] Dialing new connection to node %s at %s", targetID, addr)
 	// 设置连接超时
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
@@ -190,15 +191,25 @@ func (t *Transport) remoteCall(targetID, method string, args any, reply any) err
 		return err
 	}
 
-	// 进行 RPC 调用
-	err = client.Call(method, args, reply)
+	// 使用 client.Go 实现带超时的 RPC 调用
+	// net/rpc 的 Call 方法是阻塞的且没有超时控制，如果网络分区或对端挂起，会导致调用者永久阻塞。
+	call := client.Go(method, args, reply, nil)
+
+	select {
+	case <-call.Done:
+		err = call.Error
+	case <-time.After(2 * time.Second): // 设置 2 秒超时
+		err = errors.New("rpc call timed out")
+	}
+
 	if err != nil {
-		// 如果是连接已关闭等错误，说明缓存的 client 失效了，移除它
-		if errors.Is(err, rpc.ErrShutdown) {
-			t.mu.Lock()
+		// 遇到任何 RPC 错误（包括超时），都移除缓存的 client，以便下次重连。
+		t.mu.Lock()
+		if cachedClient, ok := t.peers[targetID]; ok && cachedClient == client {
 			delete(t.peers, targetID)
-			t.mu.Unlock()
+			client.Close()
 		}
+		t.mu.Unlock()
 		return err
 	}
 	return nil

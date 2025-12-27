@@ -46,8 +46,9 @@ type Raft struct {
 
 	// --- 快照相关 ---
 	// snapshot 在内存中持有当前最新的快照，避免频繁从存储中读取
-	snapshot       *param.Snapshot
-	isSnapshotting bool // 标记是否正在后台生成快照
+	snapshot          *param.Snapshot
+	isSnapshotting    bool // 标记是否正在后台生成快照
+	snapshotThreshold int  // 自动触发快照的日志大小阈值，<=0 表示禁用
 
 	// --- 选举相关 ---
 	electionResetEvent     time.Time
@@ -70,21 +71,22 @@ type Raft struct {
 // 注意：store 参数的类型现在是 storage.KVStorage。
 func NewRaft(id int, peerIds []int, store storage.Storage, stateMachine storage.StateMachine, trans transport.Transport, commitChan chan<- param.CommitEntry) *Raft {
 	r := &Raft{
-		id:               id,
-		peerIds:          peerIds,
-		store:            store,
-		stateMachine:     stateMachine,
-		trans:            trans,
-		inJointConsensus: false,
-		state:            param.Follower,
-		votedFor:         -1, // -1 表示未投票
-		commitChan:       commitChan,
-		nextIndex:        make(map[int]uint64),
-		matchIndex:       make(map[int]uint64),
-		clientSessions:   make(map[int64]int64),
-		notifyApply:      make(map[uint64]chan any),
-		shutdownChan:     make(chan struct{}),
-		lastAck:          make(map[int]time.Time),
+		id:                id,
+		peerIds:           peerIds,
+		store:             store,
+		stateMachine:      stateMachine,
+		trans:             trans,
+		inJointConsensus:  false,
+		state:             param.Follower,
+		votedFor:          -1, // -1 表示未投票
+		commitChan:        commitChan,
+		nextIndex:         make(map[int]uint64),
+		matchIndex:        make(map[int]uint64),
+		clientSessions:    make(map[int64]int64),
+		notifyApply:       make(map[uint64]chan any),
+		shutdownChan:      make(chan struct{}),
+		lastAck:           make(map[int]time.Time),
+		snapshotThreshold: -1, // 默认禁用自动快照
 	}
 	// 从稳定存储中恢复状态。
 	if store != nil {
@@ -108,10 +110,40 @@ func (r *Raft) ID() int {
 	return r.id
 }
 
+func (r *Raft) Peers() []int {
+	return r.peerIds
+}
+
+func (r *Raft) Storage() storage.Storage {
+	return r.store
+}
+
+func (r *Raft) StateMachine() storage.StateMachine {
+	return r.stateMachine
+}
+
+func (r *Raft) Transport() transport.Transport {
+	return r.trans
+}
+
+// State 返回当前节点的状态。
+func (r *Raft) State() param.State {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state
+}
+
 func (r *Raft) IsStopped() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.state == param.Dead
+}
+
+// SetSnapshotThreshold 设置自动快照的阈值。
+func (r *Raft) SetSnapshotThreshold(threshold int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.snapshotThreshold = threshold
 }
 
 // Run 启动 Raft 节点的主循环。

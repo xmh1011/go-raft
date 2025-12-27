@@ -43,23 +43,23 @@ func (r *Raft) InstallSnapshot(args *param.InstallSnapshotArgs, reply *param.Ins
 
 // TakeSnapshot 由上层应用（状态机）在合适的时候调用，以触发一次快照。
 // 为异步实现，避免阻塞 Raft 主循环。
-func (r *Raft) TakeSnapshot(logSizeThreshold int) {
+func (r *Raft) TakeSnapshot() {
 	r.mu.Lock()
 
 	// 1. 防止并发快照
-	if r.isSnapshotting {
+	if r.isSnapshotting || r.snapshotThreshold <= 0 {
 		r.mu.Unlock()
 		return
 	}
 
 	// 2. 检查日志大小是否满足阈值
 	logSize, err := r.store.LogSize()
-	if err != nil || logSize < logSizeThreshold {
+	if err != nil || logSize < r.snapshotThreshold {
 		r.mu.Unlock()
 		return
 	}
 
-	log.Printf("[Snapshot] Node %d log size %d exceeds threshold %d, preparing snapshot.", r.id, logSize, logSizeThreshold)
+	log.Printf("[Snapshot] Node %d log size %d exceeds threshold %d, preparing snapshot.", r.id, logSize, r.snapshotThreshold)
 
 	// 3. 【同步阶段】捕获快照元数据和状态机数据
 	// 我们必须在持有锁的情况下捕获当前的 lastApplied 及其对应的 Term。

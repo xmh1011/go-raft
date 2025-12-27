@@ -57,6 +57,7 @@ func NewRequestVoteArgs(term uint64, candidateId int, lastLogIndex, lastLogTerm 
 type RequestVoteReply struct {
 	Term        uint64 // 当前节点的任期号（用于候选者更新自身）
 	VoteGranted bool   // 是否投票给候选者
+	CandidateId int    // 投票者的ID (注意：这里应该是 VoterID，但为了兼容性先保留 CandidateId 命名，或者修改为 VoterID)
 }
 
 func NewRequestVoteReply() *RequestVoteReply {

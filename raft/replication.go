@@ -167,7 +167,6 @@ func (r *Raft) handleSuccessfulAppendEntries(peerId int, args *param.AppendEntri
 	newNextIndex := args.PrevLogIndex + uint64(len(args.Entries)) + 1
 	r.nextIndex[peerId] = newNextIndex
 	r.matchIndex[peerId] = newNextIndex - 1
-	// log.Printf("[Log Replication] Node %d successfully replicated logs to peer %d. nextIndex=%d, matchIndex=%d", r.id, peerId, r.nextIndex[peerId], r.matchIndex[peerId])
 
 	r.updateCommitIndex()
 }
@@ -417,6 +416,9 @@ func (r *Raft) applyLogs() {
 
 	// 2. 遍历并分发每一条待应用的日志。
 	r.dispatchEntries(entriesToApply)
+
+	// 3. 检查是否需要触发快照
+	r.TakeSnapshot()
 }
 
 // fetchEntriesToApply 负责从存储中获取所有已提交但尚未应用的日志条目。
