@@ -834,7 +834,7 @@ func TestCluster_UnreliableNetwork_Churn(t *testing.T) {
 					default:
 						var leader *raft.Raft
 						for _, n := range c.nodes {
-							if !n.IsStopped() && n.State() == param.Leader {
+							if !n.IsStopped() && n.State() == raft.Leader {
 								leader = n
 								break
 							}

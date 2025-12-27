@@ -23,13 +23,13 @@ func TestStorage(t *testing.T) {
 		s := NewStorage()
 		assert.NotNil(t, s, "NewStorage should not return nil")
 
-		lastIdx, err := s.LastLogIndex()
+		lastIDx, err := s.LastLogIndex()
 		assert.NoError(t, err, "LastLogIndex() should not fail")
-		assert.Equal(t, uint64(0), lastIdx, "initial last index should be 0")
+		assert.Equal(t, uint64(0), lastIDx, "initial last index should be 0")
 
-		firstIdx, err := s.FirstLogIndex()
+		firstIDx, err := s.FirstLogIndex()
 		assert.NoError(t, err, "FirstLogIndex() should not fail")
-		assert.Equal(t, uint64(1), firstIdx, "initial first index should be 1")
+		assert.Equal(t, uint64(1), firstIDx, "initial first index should be 1")
 
 		_, err = s.GetEntry(1)
 		assert.ErrorIs(t, err, ErrLogNotFound, "should return ErrLogNotFound for initial empty log")
@@ -56,9 +56,9 @@ func TestStorage(t *testing.T) {
 		err := s.AppendEntries(entries)
 		assert.NoError(t, err, "AppendEntries() should not fail")
 
-		lastIdx, err := s.LastLogIndex()
+		lastIDx, err := s.LastLogIndex()
 		assert.NoError(t, err, "LastLogIndex() should not fail")
-		assert.Equal(t, uint64(5), lastIdx, "last index should be 5 after append")
+		assert.Equal(t, uint64(5), lastIDx, "last index should be 5 after append")
 
 		entry3, err := s.GetEntry(3)
 		assert.NoError(t, err, "GetEntry(3) should not fail")
@@ -77,9 +77,9 @@ func TestStorage(t *testing.T) {
 		err = s.TruncateLog(4)
 		assert.NoError(t, err, "TruncateLog(4) should not fail")
 
-		lastIdx, err = s.LastLogIndex()
+		lastIDx, err = s.LastLogIndex()
 		assert.NoError(t, err, "LastLogIndex() should not fail after truncation")
-		assert.Equal(t, uint64(3), lastIdx, "last index should be 3 after truncation")
+		assert.Equal(t, uint64(3), lastIDx, "last index should be 3 after truncation")
 
 		_, err = s.GetEntry(4)
 		assert.ErrorIs(t, err, ErrLogNotFound, "should return ErrLogNotFound for truncated index 4")
@@ -87,9 +87,9 @@ func TestStorage(t *testing.T) {
 		// Truncating with an out-of-bounds index should be a no-op
 		err = s.TruncateLog(10)
 		assert.NoError(t, err, "TruncateLog(10) with out-of-bounds index should not fail")
-		lastIdx, err = s.LastLogIndex()
+		lastIDx, err = s.LastLogIndex()
 		assert.NoError(t, err, "LastLogIndex() should not fail")
-		assert.Equal(t, uint64(3), lastIdx, "last index should not change after out-of-bounds truncation")
+		assert.Equal(t, uint64(3), lastIDx, "last index should not change after out-of-bounds truncation")
 	})
 
 	t.Run("Snapshot and Compaction", func(t *testing.T) {
@@ -123,11 +123,11 @@ func TestStorage(t *testing.T) {
 		assert.NoError(t, err, "GetEntry(6) should succeed after compaction")
 		assert.Equal(t, uint64(6), entry6.Index, "The first entry after compaction should be index 6")
 
-		lastIdx, _ := s.LastLogIndex()
-		assert.Equal(t, uint64(10), lastIdx, "expected last index to still be 10")
+		lastIDx, _ := s.LastLogIndex()
+		assert.Equal(t, uint64(10), lastIDx, "expected last index to still be 10")
 
-		firstIdx, _ := s.FirstLogIndex()
-		assert.Equal(t, uint64(6), firstIdx, "expected first index to be 6 after compaction")
+		firstIDx, _ := s.FirstLogIndex()
+		assert.Equal(t, uint64(6), firstIDx, "expected first index to be 6 after compaction")
 
 		// 4. Test compaction with an index that is too low or too high
 		err = s.CompactLog(4) // Already compacted

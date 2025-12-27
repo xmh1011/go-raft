@@ -9,7 +9,7 @@ import (
 
 	gomock "github.com/golang/mock/gomock"
 	param "github.com/xmh1011/go-raft/param"
-	rpc "github.com/xmh1011/go-raft/raft/rpc"
+	api "github.com/xmh1011/go-raft/raft/api"
 )
 
 // MockTransport is a mock of Transport interface.
@@ -64,7 +64,7 @@ func (mr *MockTransportMockRecorder) Close() *gomock.Call {
 }
 
 // RegisterRaft mocks base method.
-func (m *MockTransport) RegisterRaft(raftInstance rpc.Server) {
+func (m *MockTransport) RegisterRaft(raftInstance api.RaftService) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "RegisterRaft", raftInstance)
 }

@@ -62,7 +62,7 @@ message InstallSnapshotResponse {
 }
 
 message ClientRequestRequest {
-  int64 client_id = 1;
+  int64 client_id = 1 [json_name = "ClientID"];
   int64 sequence_num = 2;
   bytes command = 3; // Gob encoded
 }

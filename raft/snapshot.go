@@ -116,7 +116,7 @@ func (r *Raft) TakeSnapshot() {
 		r.mu.Lock()
 
 		// 再次检查状态（防止在 IO 期间节点关闭或状态剧烈变化）
-		if r.state == param.Dead {
+		if r.state == Dead {
 			r.mu.Unlock()
 			return
 		}
@@ -180,9 +180,9 @@ func (r *Raft) updateStateAfterSnapshot(snapshotIndex uint64) {
 }
 
 // sendSnapshot 是 Leader 用于向落后的 Follower 发送快照
-func (r *Raft) sendSnapshot(peerId int) {
+func (r *Raft) sendSnapshot(peerID int) {
 	// 1. 从存储中读取最新的快照以准备发送。
-	snapshot, err := r.readSnapshotForSending(peerId)
+	snapshot, err := r.readSnapshotForSending(peerID)
 	if err != nil {
 		return
 	}
@@ -195,39 +195,39 @@ func (r *Raft) sendSnapshot(peerId int) {
 
 	// 3. 发起 RPC 调用。
 	reply := &param.InstallSnapshotReply{}
-	if err := r.trans.SendInstallSnapshot(strconv.Itoa(peerId), args, reply); err != nil {
-		log.Printf("[Snapshot] Node %d failed to send snapshot to %d: %v", r.id, peerId, err)
+	if err := r.trans.SendInstallSnapshot(strconv.Itoa(peerID), args, reply); err != nil {
+		log.Printf("[Snapshot] Node %d failed to send snapshot to %d: %v", r.id, peerID, err)
 		return
 	}
 
 	// 4. 处理 RPC 响应。
-	r.processSnapshotReply(peerId, reply, snapshot.LastIncludedIndex, savedCurrentTerm)
+	r.processSnapshotReply(peerID, reply, snapshot.LastIncludedIndex, savedCurrentTerm)
 }
 
 // readSnapshotForSending 负责加锁并从存储中读取最新的快照。
-func (r *Raft) readSnapshotForSending(peerId int) (*param.Snapshot, error) {
+func (r *Raft) readSnapshotForSending(peerID int) (*param.Snapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	snapshot, err := r.store.ReadSnapshot()
 	if err != nil {
-		log.Printf("[ERROR] Node %d failed to read snapshot to send to peer %d: %v", r.id, peerId, err)
+		log.Printf("[ERROR] Node %d failed to read snapshot to send to peer %d: %v", r.id, peerID, err)
 		return nil, err
 	}
 	if snapshot == nil {
-		log.Printf("[ERROR] Node %d tried to send snapshot to peer %d, but no snapshot is available.", r.id, peerId)
+		log.Printf("[ERROR] Node %d tried to send snapshot to peer %d, but no snapshot is available.", r.id, peerID)
 		return nil, errors.New("no snapshot available to send")
 	}
 	return snapshot, nil
 }
 
 // processSnapshotReply 负责处理来自 Follower 的 InstallSnapshot RPC 响应。
-func (r *Raft) processSnapshotReply(peerId int, reply *param.InstallSnapshotReply, snapshotLastIndex uint64, savedCurrentTerm uint64) {
+func (r *Raft) processSnapshotReply(peerID int, reply *param.InstallSnapshotReply, snapshotLastIndex uint64, savedCurrentTerm uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// 检查响应是否已过期（例如，在 RPC 通信期间，Leader 身份或任期已发生变化）。
-	if r.currentTerm != savedCurrentTerm || r.state != param.Leader {
+	if r.currentTerm != savedCurrentTerm || r.state != Leader {
 		return
 	}
 
@@ -240,11 +240,11 @@ func (r *Raft) processSnapshotReply(peerId int, reply *param.InstallSnapshotRepl
 	}
 
 	// 成功的快照发送也是一个有效的 ACK
-	r.lastAck[peerId] = time.Now()
+	r.lastAck[peerID] = time.Now()
 
 	// 如果一切正常，说明快照已成功发送并被对方接收。
 	// 更新该 Follower 的 nextIndex 和 matchIndex，使其指向快照之后的第一个位置。
-	r.nextIndex[peerId] = snapshotLastIndex + 1
-	r.matchIndex[peerId] = snapshotLastIndex
-	log.Printf("[Snapshot] Node %d successfully sent snapshot to peer %d. nextIndex=%d, matchIndex=%d", r.id, peerId, r.nextIndex[peerId], r.matchIndex[peerId])
+	r.nextIndex[peerID] = snapshotLastIndex + 1
+	r.matchIndex[peerID] = snapshotLastIndex
+	log.Printf("[Snapshot] Node %d successfully sent snapshot to peer %d. nextIndex=%d, matchIndex=%d", r.id, peerID, r.nextIndex[peerID], r.matchIndex[peerID])
 }

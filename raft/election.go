@@ -33,8 +33,8 @@ func newElectionContext(r *Raft) *electionContext {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	oldPeers := append([]int(nil), r.peerIds...)
-	newPeers := append([]int(nil), r.newPeerIds...)
+	oldPeers := append([]int(nil), r.peerIDs...)
+	newPeers := append([]int(nil), r.newPeerIDs...)
 
 	ctx := &electionContext{
 		inJoint:        r.inJointConsensus,
@@ -59,7 +59,7 @@ func newElectionContext(r *Raft) *electionContext {
 func (r *Raft) startElection() {
 	r.mu.Lock()
 	// 检查状态，只有 Follower 或 Candidate 可以发起选举
-	if r.state != param.Follower && r.state != param.Candidate {
+	if r.state != Follower && r.state != Candidate {
 		r.mu.Unlock()
 		return
 	}
@@ -150,7 +150,7 @@ func (r *Raft) handlePreVote(args *param.RequestVoteArgs, reply *param.RequestVo
 	// 2. 【关键】Leader 租约检查 (Sticky Leader)
 	// 如果在 electionTimeout 内收到过 Leader 的消息，说明集群健康，拒绝干扰。
 	if r.leaderHasLease() {
-		log.Printf("[PreVote] Node %d rejected PreVote from %d (Leader lease active)", r.id, args.CandidateId)
+		log.Printf("[PreVote] Node %d rejected PreVote from %d (Leader lease active)", r.id, args.CandidateID)
 		reply.VoteGranted = false
 		return nil
 	}
@@ -164,7 +164,7 @@ func (r *Raft) handlePreVote(args *param.RequestVoteArgs, reply *param.RequestVo
 	// 4. 授予预投票 (注意：这里不持久化 VotedFor，也不重置选举定时器)
 	if isLogUpToDate {
 		reply.VoteGranted = true
-		log.Printf("[PreVote] Node %d granted PreVote to %d for term %d", r.id, args.CandidateId, args.Term)
+		log.Printf("[PreVote] Node %d granted PreVote to %d for term %d", r.id, args.CandidateID, args.Term)
 	} else {
 		reply.VoteGranted = false
 	}
@@ -182,14 +182,14 @@ func (r *Raft) leaderHasLease() bool {
 func (r *Raft) initializeCandidateState() error {
 	// 如果我们不是 Follower 或 Candidate（例如，Stop() 被调用且状态为 Dead），
 	// 则中止选举，防止 Goroutine 泄露。
-	if r.state != param.Follower && r.state != param.Candidate {
-		log.Printf("[Election] Node %d aborting election start; state is %s", r.id, r.state)
+	if r.state != Follower && r.state != Candidate {
+		log.Printf("[Election] Node %d aborting election start; state is %d", r.id, r.state)
 		// 返回一个错误，以便 startElection 协程能安全退出
 		return errors.New("cannot start election in non-follower/candidate state")
 	}
 
 	// 将状态更新为 Candidate，增加当前任期号，并给自己投票。
-	r.state = param.Candidate
+	r.state = Candidate
 	r.currentTerm++
 	r.votedFor = r.id
 	// 重置选举计时器，为本轮选举设定新的超时时间。
@@ -236,12 +236,12 @@ func (r *Raft) broadcastVoteRequests(term uint64, lastLogIndex uint64, lastLogTe
 
 	// 并发地向集群中的所有其他节点发送投票请求。
 	// 使用 goroutine 可以确保所有请求并行发出，加快选举过程。
-	for _, peerId := range r.getAllPeerIDs() {
+	for _, peerID := range r.getAllPeerIDs() {
 		// 跳过自己
-		if peerId == r.id {
+		if peerID == r.id {
 			continue
 		}
-		go r.sendVoteRequest(peerId, term, lastLogIndex, lastLogTerm, voteChan, isPreVote)
+		go r.sendVoteRequest(peerID, term, lastLogIndex, lastLogTerm, voteChan, isPreVote)
 	}
 	return voteChan
 }
@@ -341,9 +341,9 @@ func (r *Raft) transitionToLeader(electionTerm uint64) {
 	defer r.mu.Unlock()
 
 	// 再次确认自己仍然是本轮选举的候选人，防止因状态变更导致的问题。
-	if r.state == param.Candidate && r.currentTerm == electionTerm {
+	if r.state == Candidate && r.currentTerm == electionTerm {
 		log.Printf("[Election] Node %d elected as Leader for term %d", r.id, r.currentTerm)
-		r.state = param.Leader
+		r.state = Leader
 		r.initLeaderState()
 		r.startHeartbeat()
 	}
@@ -356,7 +356,7 @@ func (r *Raft) handleElectionTimeout(electionTerm uint64) {
 	defer r.mu.Unlock()
 
 	// 确认自己仍然是本轮选举的候选人，然后退回为 Follower 状态。
-	if r.state == param.Candidate && r.currentTerm == electionTerm {
+	if r.state == Candidate && r.currentTerm == electionTerm {
 		log.Printf("[Election] Node %d election failed, reverting to Follower", r.id)
 		// 调用 becomeFollower 会更新 term, state, votedFor 并持久化
 		// 因为任期没有变，所以传入 r.currentTerm 即可
@@ -368,13 +368,13 @@ func (r *Raft) handleElectionTimeout(electionTerm uint64) {
 
 // sendVoteRequest 向单个Peer发送投票请求。
 // 新增 isPreVote 参数，并将其设置到 RPC Args 中。
-func (r *Raft) sendVoteRequest(peerId int, term uint64, lastLogIndex uint64, lastLogTerm uint64, voteChan chan<- *param.VoteResult, isPreVote bool) {
+func (r *Raft) sendVoteRequest(peerID int, term uint64, lastLogIndex uint64, lastLogTerm uint64, voteChan chan<- *param.VoteResult, isPreVote bool) {
 	args := param.NewRequestVoteArgs(term, r.id, lastLogIndex, lastLogTerm, isPreVote)
 	reply := param.NewRequestVoteReply()
 
-	if err := r.trans.SendRequestVote(strconv.Itoa(peerId), args, reply); err != nil {
-		log.Printf("[Election] Node %d failed to request vote from %d: %v", r.id, peerId, err)
-		voteChan <- &param.VoteResult{VoterID: peerId, VoteGranted: false}
+	if err := r.trans.SendRequestVote(strconv.Itoa(peerID), args, reply); err != nil {
+		log.Printf("[Election] Node %d failed to request vote from %d: %v", r.id, peerID, err)
+		voteChan <- &param.VoteResult{VoterID: peerID, VoteGranted: false}
 		return
 	}
 
@@ -388,17 +388,17 @@ func (r *Raft) sendVoteRequest(peerId int, term uint64, lastLogIndex uint64, las
 	// 只有在 VoteGranted 为 false 且 reply.Term > r.currentTerm 时，才需要退回。
 	// 对于 Pre-Vote，args.Term = r.currentTerm + 1。如果 reply.Term == args.Term 且 VoteGranted=true，这是好事。
 	if reply.Term > r.currentTerm && !reply.VoteGranted {
-		log.Printf("[Election] Node %d found higher term %d from peer %d, becomes Follower", r.id, reply.Term, peerId)
+		log.Printf("[Election] Node %d found higher term %d from peer %d, becomes Follower", r.id, reply.Term, peerID)
 		// 注意：这里更新到 reply.Term
 		if err := r.becomeFollower(reply.Term); err != nil {
 			log.Printf("[ERROR] Node %d failed to persist state: %v", r.id, err)
 		}
 		// 即使 Pre-Vote 失败也返回，防止误判
-		voteChan <- &param.VoteResult{VoterID: peerId, VoteGranted: false}
+		voteChan <- &param.VoteResult{VoterID: peerID, VoteGranted: false}
 		return
 	}
 
-	voteChan <- &param.VoteResult{VoterID: peerId, VoteGranted: reply.VoteGranted}
+	voteChan <- &param.VoteResult{VoterID: peerID, VoteGranted: reply.VoteGranted}
 }
 
 // handleVoteTermLogic 封装了所有与任期相关的逻辑。
@@ -429,7 +429,7 @@ func (r *Raft) handleVoteTermLogic(args *param.RequestVoteArgs, reply *param.Req
 // 此函数必须在持有锁的情况下被调用。
 func (r *Raft) decideVote(args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
 	// 检查自己是否有资格投票（在本任期内还未投票，或已投给当前候选人）。
-	canVote := r.votedFor == -1 || r.votedFor == args.CandidateId
+	canVote := r.votedFor == -1 || r.votedFor == args.CandidateID
 
 	// 检查候选人的日志是否至少和自己一样新。
 	logIsUpToDate, err := r.isLogUpToDate(args.LastLogIndex, args.LastLogTerm)
@@ -440,14 +440,14 @@ func (r *Raft) decideVote(args *param.RequestVoteArgs, reply *param.RequestVoteR
 
 	// 只有同时满足两个条件时，才授予投票。
 	if canVote && logIsUpToDate {
-		if err := r.grantVote(args.CandidateId); err != nil {
+		if err := r.grantVote(args.CandidateID); err != nil {
 			reply.VoteGranted = false
 			return err
 		}
 		reply.VoteGranted = true
 	} else {
 		// 否则，拒绝投票，并记录详细原因。
-		log.Printf("[RequestVote] Node %d denying vote for term %d to candidate %d. (canVote=%t, logIsUpToDate=%t)", r.id, r.currentTerm, args.CandidateId, canVote, logIsUpToDate)
+		log.Printf("[RequestVote] Node %d denying vote for term %d to candidate %d. (canVote=%t, logIsUpToDate=%t)", r.id, r.currentTerm, args.CandidateID, canVote, logIsUpToDate)
 		reply.VoteGranted = false
 	}
 	return nil
@@ -458,7 +458,7 @@ func (r *Raft) decideVote(args *param.RequestVoteArgs, reply *param.RequestVoteR
 func (r *Raft) isLeader() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.state == param.Leader
+	return r.state == Leader
 }
 
 // isDuplicateRequest 检查一个客户端请求是否是重复的。
@@ -501,9 +501,9 @@ func (r *Raft) isLogUpToDate(candidateLastLogIndex, candidateLastLogTerm uint64)
 
 // grantVote 记录为指定候选人投票的动作，并将其持久化。
 // 此函数必须在持有锁的情况下被调用。
-func (r *Raft) grantVote(candidateId int) error {
-	log.Printf("[RequestVote] Node %d granting vote for term %d to candidate %d.", r.id, r.currentTerm, candidateId)
-	r.votedFor = candidateId
+func (r *Raft) grantVote(candidateID int) error {
+	log.Printf("[RequestVote] Node %d granting vote for term %d to candidate %d.", r.id, r.currentTerm, candidateID)
+	r.votedFor = candidateID
 	r.electionResetEvent = time.Now()
 
 	if err := r.store.SetState(param.HardState{CurrentTerm: r.currentTerm, VotedFor: uint64(r.votedFor)}); err != nil {
