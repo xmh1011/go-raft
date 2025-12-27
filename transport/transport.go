@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/xmh1011/go-raft/param"
-	"github.com/xmh1011/go-raft/raft/rpc"
+	"github.com/xmh1011/go-raft/raft/api"
 	"github.com/xmh1011/go-raft/transport/grpc"
 	"github.com/xmh1011/go-raft/transport/inmemory"
 	"github.com/xmh1011/go-raft/transport/tcp"
@@ -26,7 +26,7 @@ type Transport interface {
 	SetPeers(peers map[int]string)
 
 	// RegisterRaft 注册 Raft 实例，用于处理接收到的 RPC 请求。
-	RegisterRaft(raftInstance rpc.Server)
+	RegisterRaft(raftInstance api.RaftService)
 
 	// Start 注册 RPC 服务并开始接受连接。
 	Start() error

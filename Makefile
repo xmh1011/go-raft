@@ -67,6 +67,7 @@ install-mockgen:
 mockgen:
 	mockgen -source=storage/storage.go -destination=storage/storage_mock.go -package=storage
 	mockgen -source=transport/transport.go -destination=transport/transport_mock.go -package=transport
+	mockgen -source=raft/api/service.go -destination=raft/api/service_mock.go -package=api
 
 install-protoc-gen:
 	@echo "Installing protoc-gen-go and protoc-gen-go-grpc..."

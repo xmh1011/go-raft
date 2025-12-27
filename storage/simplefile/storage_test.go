@@ -32,13 +32,13 @@ func TestStorage(t *testing.T) {
 	t.Run("Initial State", func(t *testing.T) {
 		s, _ := newTestStorage(t)
 
-		lastIdx, err := s.LastLogIndex()
+		lastIDx, err := s.LastLogIndex()
 		assert.NoError(t, err)
-		assert.Equal(t, uint64(0), lastIdx)
+		assert.Equal(t, uint64(0), lastIDx)
 
-		firstIdx, err := s.FirstLogIndex()
+		firstIDx, err := s.FirstLogIndex()
 		assert.NoError(t, err)
-		assert.Equal(t, uint64(1), firstIdx)
+		assert.Equal(t, uint64(1), firstIDx)
 
 		_, err = s.GetEntry(1)
 		assert.ErrorIs(t, err, ErrLogNotFound)
@@ -64,9 +64,9 @@ func TestStorage(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, newState, retrievedState)
 
-		lastIdx, err := s2.LastLogIndex()
+		lastIDx, err := s2.LastLogIndex()
 		assert.NoError(t, err)
-		assert.Equal(t, uint64(3), lastIdx)
+		assert.Equal(t, uint64(3), lastIDx)
 
 		entry2, err := s2.GetEntry(2)
 		assert.NoError(t, err)
@@ -79,15 +79,15 @@ func TestStorage(t *testing.T) {
 
 		assert.NoError(t, s.AppendEntries(entries))
 
-		lastIdx, err := s.LastLogIndex()
+		lastIDx, err := s.LastLogIndex()
 		assert.NoError(t, err)
-		assert.Equal(t, uint64(5), lastIdx)
+		assert.Equal(t, uint64(5), lastIDx)
 
 		// Truncate
 		assert.NoError(t, s.TruncateLog(4))
-		lastIdx, err = s.LastLogIndex()
+		lastIDx, err = s.LastLogIndex()
 		assert.NoError(t, err)
-		assert.Equal(t, uint64(3), lastIdx)
+		assert.Equal(t, uint64(3), lastIDx)
 
 		_, err = s.GetEntry(4)
 		assert.ErrorIs(t, err, ErrLogNotFound)

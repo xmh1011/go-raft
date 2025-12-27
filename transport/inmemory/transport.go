@@ -6,17 +6,17 @@ import (
 	"sync"
 
 	"github.com/xmh1011/go-raft/param"
-	"github.com/xmh1011/go-raft/raft/rpc"
+	"github.com/xmh1011/go-raft/raft/api"
 )
 
 // Transport 是一个基于内存的 Transport 实现，用于在单个进程内模拟 Raft 节点间的通信。
 type Transport struct {
 	mu           sync.RWMutex
-	localAddr    string                // 本地节点的地址
-	peers        map[string]rpc.Server // 存储集群中其他节点的引用 (Addr -> Server)
-	resolvers    map[int]string        // NodeID -> Address
-	allowedPeers map[string]bool       // 允许通信的节点地址 (用于模拟网络分区)
-	raft         rpc.Server
+	localAddr    string                     // 本地节点的地址
+	peers        map[string]api.RaftService // 存储集群中其他节点的引用 (Addr -> Server)
+	resolvers    map[int]string             // NodeID -> Address
+	allowedPeers map[string]bool            // 允许通信的节点地址 (用于模拟网络分区)
+	raft         api.RaftService
 }
 
 // NewTransport 创建一个新的 Transport 实例。
@@ -24,7 +24,7 @@ type Transport struct {
 func NewTransport(addr string) *Transport {
 	return &Transport{
 		localAddr: addr,
-		peers:     make(map[string]rpc.Server),
+		peers:     make(map[string]api.RaftService),
 		resolvers: make(map[int]string),
 	}
 }
@@ -50,7 +50,7 @@ func (t *Transport) SetPeers(peers map[int]string) {
 }
 
 // RegisterRaft 注册 Raft 实例。
-func (t *Transport) RegisterRaft(raftInstance rpc.Server) {
+func (t *Transport) RegisterRaft(raftInstance api.RaftService) {
 	t.raft = raftInstance
 }
 
@@ -66,7 +66,7 @@ func (t *Transport) Close() error {
 
 // Connect 将一个节点（peer）添加到 transport 的注册表中。
 // 这样，当前的 transport 就知道如何“发送”消息给这个 peer。
-func (t *Transport) Connect(peerAddr string, server rpc.Server) {
+func (t *Transport) Connect(peerAddr string, server api.RaftService) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.peers[peerAddr] = server
@@ -81,7 +81,7 @@ func (t *Transport) Disconnect(peerAddr string) {
 
 // getPeer 根据目标 ID 或地址查找对应的 RPCServer。
 // 支持直接传入地址，如果解析 ID 失败，则作为地址处理。
-func (t *Transport) getPeer(target string) (rpc.Server, error) {
+func (t *Transport) getPeer(target string) (api.RaftService, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
