@@ -16,7 +16,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/xmh1011/go-raft/param"
-	"github.com/xmh1011/go-raft/transport"
+	"github.com/xmh1011/go-raft/raft/rpc"
 	"github.com/xmh1011/go-raft/transport/grpc/pb"
 )
 
@@ -26,13 +26,12 @@ type Transport struct {
 	listener  net.Listener
 	localAddr string
 
-	raft       transport.RPCServer
+	raft       rpc.Server
 	grpcServer *grpc.Server
-
-	mu        sync.RWMutex
-	conns     map[string]*grpc.ClientConn
-	clients   map[string]pb.RaftServiceClient
-	resolvers map[int]string
+	mu         sync.RWMutex
+	conns      map[string]*grpc.ClientConn
+	clients    map[string]pb.RaftServiceClient
+	resolvers  map[int]string
 }
 
 // NewTransport creates a new gRPC Transport.
@@ -76,7 +75,7 @@ func (t *Transport) SetPeers(peers map[int]string) {
 }
 
 // RegisterRaft registers the Raft RPC server.
-func (t *Transport) RegisterRaft(raftInstance transport.RPCServer) {
+func (t *Transport) RegisterRaft(raftInstance rpc.Server) {
 	t.raft = raftInstance
 }
 
@@ -90,6 +89,10 @@ func (t *Transport) Start() error {
 
 	go func() {
 		if err := t.grpcServer.Serve(t.listener); err != nil {
+			// Serve returns a non-nil error unless Stop or GracefulStop is called.
+			// We can ignore "closed network connection" errors if we are shutting down.
+			// But grpc.Serve usually returns specific errors.
+			// For now, just log it.
 			log.Printf("[GRPCTransport] Server stopped: %v", err)
 		}
 	}()
@@ -164,6 +167,12 @@ func (t *Transport) getPeerClient(targetID string) (pb.RaftServiceClient, error)
 // --- Helper functions for encoding/decoding ---
 
 func encode(v any) ([]byte, error) {
+	// If v is already []byte (e.g. from JSON marshal), return it directly?
+	// No, gob encoding adds type information.
+	// But wait, in our integration tests, Command is []byte (json marshaled).
+	// If we gob encode a []byte, we get a gob-encoded byte slice.
+	// On the receiving end, we gob decode it back to []byte.
+	// This is fine.
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(&v); err != nil {
 		return nil, err

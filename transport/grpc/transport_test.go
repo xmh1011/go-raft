@@ -6,10 +6,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
 	"github.com/xmh1011/go-raft/param"
 )
 
-// MockRPCServer is a mock implementation of transport.RPCServer
+// MockRPCServer is a mock implementation of raft.RaftRPC
 type MockRPCServer struct {
 	mock.Mock
 }

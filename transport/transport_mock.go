@@ -9,6 +9,7 @@ import (
 
 	gomock "github.com/golang/mock/gomock"
 	param "github.com/xmh1011/go-raft/param"
+	rpc "github.com/xmh1011/go-raft/raft/rpc"
 )
 
 // MockTransport is a mock of Transport interface.
@@ -63,13 +64,13 @@ func (mr *MockTransportMockRecorder) Close() *gomock.Call {
 }
 
 // RegisterRaft mocks base method.
-func (m *MockTransport) RegisterRaft(raftInstance RPCServer) {
+func (m *MockTransport) RegisterRaft(raftInstance rpc.Server) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "RegisterRaft", raftInstance)
 }
 
 // RegisterRaft indicates an expected call of RegisterRaft.
-func (mr *MockTransportMockRecorder) RegisterRaft(raftInstance any) *gomock.Call {
+func (mr *MockTransportMockRecorder) RegisterRaft(raftInstance interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RegisterRaft", reflect.TypeOf((*MockTransport)(nil).RegisterRaft), raftInstance)
 }
@@ -83,7 +84,7 @@ func (m *MockTransport) SendAppendEntries(target string, req *param.AppendEntrie
 }
 
 // SendAppendEntries indicates an expected call of SendAppendEntries.
-func (mr *MockTransportMockRecorder) SendAppendEntries(target, req, resp any) *gomock.Call {
+func (mr *MockTransportMockRecorder) SendAppendEntries(target, req, resp interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendAppendEntries", reflect.TypeOf((*MockTransport)(nil).SendAppendEntries), target, req, resp)
 }
@@ -97,7 +98,7 @@ func (m *MockTransport) SendClientRequest(target string, req *param.ClientArgs, 
 }
 
 // SendClientRequest indicates an expected call of SendClientRequest.
-func (mr *MockTransportMockRecorder) SendClientRequest(target, req, resp any) *gomock.Call {
+func (mr *MockTransportMockRecorder) SendClientRequest(target, req, resp interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendClientRequest", reflect.TypeOf((*MockTransport)(nil).SendClientRequest), target, req, resp)
 }
@@ -111,7 +112,7 @@ func (m *MockTransport) SendInstallSnapshot(target string, req *param.InstallSna
 }
 
 // SendInstallSnapshot indicates an expected call of SendInstallSnapshot.
-func (mr *MockTransportMockRecorder) SendInstallSnapshot(target, req, resp any) *gomock.Call {
+func (mr *MockTransportMockRecorder) SendInstallSnapshot(target, req, resp interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendInstallSnapshot", reflect.TypeOf((*MockTransport)(nil).SendInstallSnapshot), target, req, resp)
 }
@@ -125,7 +126,7 @@ func (m *MockTransport) SendRequestVote(target string, req *param.RequestVoteArg
 }
 
 // SendRequestVote indicates an expected call of SendRequestVote.
-func (mr *MockTransportMockRecorder) SendRequestVote(target, req, resp any) *gomock.Call {
+func (mr *MockTransportMockRecorder) SendRequestVote(target, req, resp interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendRequestVote", reflect.TypeOf((*MockTransport)(nil).SendRequestVote), target, req, resp)
 }
@@ -137,7 +138,7 @@ func (m *MockTransport) SetPeers(peers map[int]string) {
 }
 
 // SetPeers indicates an expected call of SetPeers.
-func (mr *MockTransportMockRecorder) SetPeers(peers any) *gomock.Call {
+func (mr *MockTransportMockRecorder) SetPeers(peers interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetPeers", reflect.TypeOf((*MockTransport)(nil).SetPeers), peers)
 }

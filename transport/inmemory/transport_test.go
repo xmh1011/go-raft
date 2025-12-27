@@ -9,7 +9,7 @@ import (
 	"github.com/xmh1011/go-raft/param"
 )
 
-// mockRPCServer 是 transport.RPCServer 接口的一个模拟实现，用于测试。
+// mockRPCServer 是 raft.RaftRPC 接口的一个模拟实现，用于测试。
 type mockRPCServer struct {
 	// lastArgs 记录最后一次被调用时传入的参数
 	lastArgs any
@@ -54,8 +54,8 @@ func (m *mockRPCServer) ClientRequest(args *param.ClientArgs, reply *param.Clien
 
 func TestInMemoryTransport(t *testing.T) {
 	t.Run("New, Connect, and Disconnect", func(t *testing.T) {
-		trans := NewInMemoryTransport("local")
-		assert.NotNil(t, trans, "NewInMemoryTransport should not return nil")
+		trans := NewTransport("local")
+		assert.NotNil(t, trans, "NewTransport should not return nil")
 		assert.NotNil(t, trans.peers, "peers map should be initialized")
 		assert.Empty(t, trans.peers, "peers map should be initially empty")
 
@@ -69,7 +69,7 @@ func TestInMemoryTransport(t *testing.T) {
 	})
 
 	t.Run("Send successful RPC calls", func(t *testing.T) {
-		trans := NewInMemoryTransport("local")
+		trans := NewTransport("local")
 		mockPeer := &mockRPCServer{}
 		trans.Connect("peer1", mockPeer)
 
@@ -115,7 +115,7 @@ func TestInMemoryTransport(t *testing.T) {
 	})
 
 	t.Run("Send RPC to non-existent peer", func(t *testing.T) {
-		trans := NewInMemoryTransport("local")
+		trans := NewTransport("local")
 		// No peers are connected
 		err := trans.SendRequestVote("non-existent-peer", &param.RequestVoteArgs{}, &param.RequestVoteReply{})
 		assert.Error(t, err, "sending to a non-existent peer should return an error")
@@ -123,7 +123,7 @@ func TestInMemoryTransport(t *testing.T) {
 	})
 
 	t.Run("Send RPC where peer returns an error", func(t *testing.T) {
-		trans := NewInMemoryTransport("local")
+		trans := NewTransport("local")
 		mockPeer := &mockRPCServer{}
 		expectedErr := errors.New("mock RPC failure")
 		mockPeer.errorToReturn = expectedErr

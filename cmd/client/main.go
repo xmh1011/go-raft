@@ -11,14 +11,15 @@ import (
 
 	"github.com/xmh1011/go-raft/client"
 	"github.com/xmh1011/go-raft/param"
-	"github.com/xmh1011/go-raft/transport/tcp"
+	"github.com/xmh1011/go-raft/transport"
 )
 
 var (
-	peersStr string
-	op       string
-	key      string
-	value    string
+	peersStr      string
+	transportType string
+	op            string
+	key           string
+	value         string
 )
 
 func main() {
@@ -29,6 +30,7 @@ func main() {
 	}
 
 	rootCmd.Flags().StringVar(&peersStr, "peers", "1=127.0.0.1:8001,2=127.0.0.1:8002,3=127.0.0.1:8003", "Comma-separated list of peer ID=Address pairs")
+	rootCmd.Flags().StringVar(&transportType, "transport", "grpc", "Transport type: tcp, grpc")
 	rootCmd.Flags().StringVar(&op, "op", "get", "Operation type: get or set")
 	rootCmd.Flags().StringVar(&key, "key", "foo", "Key to operate on")
 	rootCmd.Flags().StringVar(&value, "value", "", "Value to set (only for set operation)")
@@ -55,11 +57,16 @@ func runClient(cmd *cobra.Command, args []string) {
 	}
 
 	// 2. 初始化网络传输
-	// 使用端口 0 让系统自动分配一个临时端口
-	trans, err := tcp.NewTCPTransport("127.0.0.1:0")
+	var trans transport.Transport
+	var err error
+
+	// 使用端口 0 让系统自动分配一个临时端口，作为客户端的源端口
+	clientAddr := "127.0.0.1:0"
+	trans, err = transport.NewClientTransport(clientAddr, transportType)
 	if err != nil {
-		log.Fatalf("Failed to create transport: %v", err)
+		log.Fatalf("Failed to initialize transport: %v", err)
 	}
+
 	// 必须设置 Peers 映射，否则 Transport 不知道如何连接目标节点
 	trans.SetPeers(peerMap)
 	defer trans.Close()
@@ -80,7 +87,7 @@ func runClient(cmd *cobra.Command, args []string) {
 	}
 
 	// 5. 发送命令
-	log.Printf("Sending command: %s key=%s val=%s", op, key, value)
+	log.Printf("Sending command: %s key=%s val=%s (via %s)", op, key, value, transportType)
 	result, success := c.SendCommand(cmdBytes)
 
 	if success {

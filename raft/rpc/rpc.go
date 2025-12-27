@@ -1,12 +1,12 @@
-package transport
+package rpc
 
 import (
 	"github.com/xmh1011/go-raft/param"
 )
 
-// RPCServer 定义了 Raft 节点需要暴露给 Transport 的 RPC 处理方法。
+// Server 定义了 Raft 节点需要暴露给 Transport 的 RPC 处理方法。
 // 任何实现了这个接口的结构体都可以被 InMemoryTransport 注册和调用。
-type RPCServer interface {
+type Server interface {
 	RequestVote(args *param.RequestVoteArgs, reply *param.RequestVoteReply) error
 
 	AppendEntries(args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error
@@ -18,7 +18,7 @@ type RPCServer interface {
 
 // RaftRPC 是一个包装器，用于将 Raft 实例的方法暴露给 net/rpc 包。
 type RaftRPC struct {
-	Raft RPCServer
+	Raft Server
 }
 
 // RequestVote 是 RequestVote RPC 的 RPC 处理器。

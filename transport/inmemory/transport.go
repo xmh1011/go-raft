@@ -2,26 +2,30 @@ package inmemory
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 
 	"github.com/xmh1011/go-raft/param"
-	"github.com/xmh1011/go-raft/transport"
+	"github.com/xmh1011/go-raft/raft/rpc"
 )
 
 // Transport 是一个基于内存的 Transport 实现，用于在单个进程内模拟 Raft 节点间的通信。
 type Transport struct {
-	mu        sync.RWMutex
-	localAddr string                         // 本地节点的地址
-	peers     map[string]transport.RPCServer // 存储集群中其他节点的引用
-	raft      transport.RPCServer
+	mu           sync.RWMutex
+	localAddr    string                // 本地节点的地址
+	peers        map[string]rpc.Server // 存储集群中其他节点的引用 (Addr -> Server)
+	resolvers    map[int]string        // NodeID -> Address
+	allowedPeers map[string]bool       // 允许通信的节点地址 (用于模拟网络分区)
+	raft         rpc.Server
 }
 
-// NewInMemoryTransport 创建一个新的 Transport 实例。
+// NewTransport 创建一个新的 Transport 实例。
 // addr 是当前使用此 transport 的节点的地址。
-func NewInMemoryTransport(addr string) *Transport {
+func NewTransport(addr string) *Transport {
 	return &Transport{
 		localAddr: addr,
-		peers:     make(map[string]transport.RPCServer),
+		peers:     make(map[string]rpc.Server),
+		resolvers: make(map[int]string),
 	}
 }
 
@@ -31,15 +35,22 @@ func (t *Transport) Addr() string {
 }
 
 // SetPeers 设置节点 ID 到地址的映射。
-// 在 InMemoryTransport 中，我们通常使用 Connect 方法手动连接，
-// 但为了满足 Transport 接口，我们提供一个空实现或简单的实现。
-// 在测试中，我们通常手动调用 Connect 来建立“连接”。
+// 在 InMemoryTransport 中，我们使用它来控制网络连通性（模拟分区），同时也用于 ID 解析。
 func (t *Transport) SetPeers(peers map[int]string) {
-	// InMemoryTransport 通常在测试中手动配置连接
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.resolvers = make(map[int]string)
+	t.allowedPeers = make(map[string]bool)
+
+	for id, addr := range peers {
+		t.resolvers[id] = addr
+		t.allowedPeers[addr] = true
+	}
 }
 
 // RegisterRaft 注册 Raft 实例。
-func (t *Transport) RegisterRaft(raftInstance transport.RPCServer) {
+func (t *Transport) RegisterRaft(raftInstance rpc.Server) {
 	t.raft = raftInstance
 }
 
@@ -55,7 +66,7 @@ func (t *Transport) Close() error {
 
 // Connect 将一个节点（peer）添加到 transport 的注册表中。
 // 这样，当前的 transport 就知道如何“发送”消息给这个 peer。
-func (t *Transport) Connect(peerAddr string, server transport.RPCServer) {
+func (t *Transport) Connect(peerAddr string, server rpc.Server) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.peers[peerAddr] = server
@@ -68,13 +79,39 @@ func (t *Transport) Disconnect(peerAddr string) {
 	delete(t.peers, peerAddr)
 }
 
-// getPeer 根据目标地址查找对应的 RPCServer。
-func (t *Transport) getPeer(target string) (transport.RPCServer, error) {
+// getPeer 根据目标 ID 或地址查找对应的 RPCServer。
+// 支持直接传入地址，如果解析 ID 失败，则作为地址处理。
+func (t *Transport) getPeer(target string) (rpc.Server, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	peer, ok := t.peers[target]
+
+	var addr string
+
+	// 1. 尝试将 target 解析为 NodeID (int)
+	id, err := strconv.Atoi(target)
+	if err == nil {
+		// 如果是数字，通过 resolvers 查找对应的地址
+		resolvedAddr, ok := t.resolvers[id]
+		if !ok {
+			return nil, fmt.Errorf("address not found for node %d", id)
+		}
+		addr = resolvedAddr
+	} else {
+		addr = target
+	}
+
+	// 2. 检查网络分区 (Partition Check)
+	// 如果设置了 allowedPeers，必须检查是否允许通信
+	if t.allowedPeers != nil {
+		if !t.allowedPeers[addr] {
+			return nil, fmt.Errorf("network partition: peer %s not reachable", addr)
+		}
+	}
+
+	// 3. 获取 Server 实例
+	peer, ok := t.peers[addr]
 	if !ok {
-		return nil, fmt.Errorf("could not connect to peer: %s", target)
+		return nil, fmt.Errorf("could not connect to peer: %s (addr: %s)", target, addr)
 	}
 	return peer, nil
 }

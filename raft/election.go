@@ -254,6 +254,17 @@ func (r *Raft) handleElectionResult(voteChan <-chan *param.VoteResult, electionT
 	// 1. 初始化选举上下文。
 	ctx := newElectionContext(r)
 
+	// 检查是否已经满足获胜条件（例如单节点集群，或者已经有足够的票数）
+	if ctx.checkWinCondition() {
+		if isPreVote {
+			log.Printf("[PreVote] Node %d Pre-Vote passed immediately (single node or majority self) for term %d. Starting Real Election.", r.id, electionTerm)
+			r.startRealElection()
+		} else {
+			r.transitionToLeader(electionTerm)
+		}
+		return
+	}
+
 	// 2. 启动选举计时器。
 	electionTimer := time.NewTimer(electionTimeout)
 	defer electionTimer.Stop()

@@ -1,7 +1,19 @@
 package storage
 
 import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
 	"github.com/xmh1011/go-raft/param"
+	"github.com/xmh1011/go-raft/storage/inmemory"
+	"github.com/xmh1011/go-raft/storage/simplefile"
+)
+
+const (
+	InmemoryStorage   = "inmemory"
+	SimpleFileStorage = "simplefile"
 )
 
 // Storage is an interface for stable storage providers in a Raft implementation.
@@ -78,4 +90,35 @@ type StateMachine interface {
 	// ApplySnapshot 将一个快照应用到状态机，用快照中的数据完全覆盖当前状态。
 	// 这个方法在 Raft 节点从 Leader 接收并安装快照时被调用。
 	ApplySnapshot(snapshot []byte) error
+}
+
+func NewStorage(storageType, dataDir string, nodeID int) (Storage, StateMachine, error) {
+	nodeDir := fmt.Sprintf("%s/node-%d", dataDir, nodeID)
+	if err := os.MkdirAll(nodeDir, 0755); err != nil {
+		return nil, nil, fmt.Errorf("failed to create data directory: %w", err)
+	}
+
+	switch storageType {
+	case InmemoryStorage:
+		log.Println("Using in-memory storage")
+		return inmemory.NewStorage(), inmemory.NewInMemoryStateMachine(), nil
+	case SimpleFileStorage:
+		storagePath := filepath.Join(nodeDir, "raft_storage.gob")
+		smPath := filepath.Join(nodeDir, "raft_sm.json")
+
+		store, err := simplefile.NewStorage(storagePath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create simplefile storage: %w", err)
+		}
+
+		stateMachine, err := simplefile.NewStateMachine(smPath)
+		if err != nil {
+			store.Close()
+			return nil, nil, fmt.Errorf("failed to create simplefile state machine: %w", err)
+		}
+		log.Printf("Using simple file storage at %s", nodeDir)
+		return store, stateMachine, nil
+	default:
+		return nil, nil, fmt.Errorf("unknown storage type: %s", storageType)
+	}
 }
