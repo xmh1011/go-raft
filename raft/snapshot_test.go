@@ -55,7 +55,8 @@ func TestTakeSnapshot_Success(t *testing.T) {
 	)
 
 	// --- Act: 执行阶段 ---
-	r.TakeSnapshot(logSizeThreshold)
+	r.SetSnapshotThreshold(logSizeThreshold)
+	r.TakeSnapshot()
 
 	// 等待异步操作完成
 	select {
@@ -178,7 +179,8 @@ func TestTakeSnapshot_LogSizeBelowThreshold(t *testing.T) {
 	mockStore.EXPECT().LogSize().Return(logSizeThreshold-1, nil).Times(1)
 
 	// --- Act ---
-	r.TakeSnapshot(logSizeThreshold)
+	r.SetSnapshotThreshold(logSizeThreshold)
+	r.TakeSnapshot()
 }
 
 // TestTakeSnapshot_FailsOnSaveError 测试当持久化快照到存储时发生错误，流程应中止。
@@ -211,7 +213,8 @@ func TestTakeSnapshot_FailsOnSaveError(t *testing.T) {
 	)
 
 	// --- Act ---
-	r.TakeSnapshot(logSizeThreshold)
+	r.SetSnapshotThreshold(logSizeThreshold)
+	r.TakeSnapshot()
 
 	// 等待异步操作完成
 	select {
