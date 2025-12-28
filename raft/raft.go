@@ -13,6 +13,16 @@ import (
 	"github.com/xmh1011/go-raft/transport"
 )
 
+// State 定义节点的状态（Consensus Module State）
+type State int
+
+const (
+	Follower State = iota
+	Candidate
+	Leader
+	Dead // 可选：表示节点已终止（用于优雅关闭）
+)
+
 type Raft struct {
 	// mu 保护对 Raft 状态的并发访问
 	mu sync.Mutex
@@ -21,8 +31,8 @@ type Raft struct {
 	id int
 
 	// Configuration state
-	peerIds          []int // 代表当前有效的配置 (Cold)
-	newPeerIds       []int // 在转换期间代表新配置 (Cnew)
+	peerIDs          []int // 代表当前有效的配置 (Cold)
+	newPeerIDs       []int // 在转换期间代表新配置 (Cnew)
 	inJointConsensus bool  // 标记集群是否处于联合共识状态
 	knownLeaderID    int   // 当前节点已知的 Leader ID
 
@@ -36,7 +46,7 @@ type Raft struct {
 	// --- Raft 核心状态 ---
 	currentTerm uint64
 	votedFor    int
-	state       param.State
+	state       State
 
 	// --- 日志与状态机相关 ---
 	commitIndex     uint64
@@ -69,15 +79,15 @@ type Raft struct {
 
 // NewRaft 创建一个新的 Raft 节点。
 // 注意：store 参数的类型现在是 storage.KVStorage。
-func NewRaft(id int, peerIds []int, store storage.Storage, stateMachine storage.StateMachine, trans transport.Transport, commitChan chan<- param.CommitEntry) *Raft {
+func NewRaft(id int, peerIDs []int, store storage.Storage, stateMachine storage.StateMachine, trans transport.Transport, commitChan chan<- param.CommitEntry) *Raft {
 	r := &Raft{
 		id:                id,
-		peerIds:           peerIds,
+		peerIDs:           peerIDs,
 		store:             store,
 		stateMachine:      stateMachine,
 		trans:             trans,
 		inJointConsensus:  false,
-		state:             param.Follower,
+		state:             Follower,
 		votedFor:          -1, // -1 表示未投票
 		commitChan:        commitChan,
 		nextIndex:         make(map[int]uint64),
@@ -111,7 +121,7 @@ func (r *Raft) ID() int {
 }
 
 func (r *Raft) Peers() []int {
-	return r.peerIds
+	return r.peerIDs
 }
 
 func (r *Raft) Storage() storage.Storage {
@@ -127,7 +137,7 @@ func (r *Raft) Transport() transport.Transport {
 }
 
 // State 返回当前节点的状态。
-func (r *Raft) State() param.State {
+func (r *Raft) State() State {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.state
@@ -136,7 +146,7 @@ func (r *Raft) State() param.State {
 func (r *Raft) IsStopped() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.state == param.Dead
+	return r.state == Dead
 }
 
 // SetSnapshotThreshold 设置自动快照的阈值。
@@ -166,7 +176,7 @@ func (r *Raft) Run() {
 			// Leader 和 Dead 状态都应该忽略 ticker。
 			// (Dead 状态最终会被 shutdownChan 捕获，但在这里检查
 			// 可以防止 Stop() 和 ticker 之间的竞态条件)
-			if r.state != param.Follower && r.state != param.Candidate {
+			if r.state != Follower && r.state != Candidate {
 				r.mu.Unlock()
 				continue
 			}
@@ -199,7 +209,7 @@ func (r *Raft) Stop() {
 	}
 
 	log.Printf("[Core] Node %d received stop signal.", r.id)
-	r.state = param.Dead
+	r.state = Dead
 	close(r.shutdownChan)
 }
 
@@ -239,7 +249,7 @@ func (r *Raft) handleLinearizableRead(cmd param.KVCommand, reply *param.ClientRe
 	r.mu.Lock()
 
 	// 1. 检查是否为 Leader
-	if r.state != param.Leader {
+	if r.state != Leader {
 		r.mu.Unlock()
 		reply.NotLeader = true
 		reply.LeaderHint = r.knownLeaderID
@@ -269,7 +279,7 @@ func (r *Raft) handleLinearizableRead(cmd param.KVCommand, reply *param.ClientRe
 	defer r.mu.Unlock()
 
 	// 重新加锁后再次检查状态，防止在确认期间被降级
-	if r.state != param.Leader {
+	if r.state != Leader {
 		reply.NotLeader = true
 		reply.LeaderHint = r.knownLeaderID
 		return nil
@@ -302,38 +312,38 @@ func (r *Raft) handleLinearizableRead(cmd param.KVCommand, reply *param.ClientRe
 func (r *Raft) confirmLeadership() bool {
 	r.mu.Lock()
 	term := r.currentTerm
-	leaderId := r.id
-	peerIds := r.getAllPeerIDs()
+	leaderID := r.id
+	peerIDs := r.getAllPeerIDs()
 
 	// 构造心跳请求列表
 	// 我们需要为每个 Peer 构造 args，为了避免在循环网络发送时持有锁，
 	// 我们先在锁内准备好所有数据。
 	type hbRequest struct {
-		peerId int
+		peerID int
 		args   *param.AppendEntriesArgs
 	}
 	var requests []hbRequest
 
-	for _, pid := range peerIds {
+	for _, pid := range peerIDs {
 		if pid == r.id {
 			continue
 		}
 
 		// 尽量构造合法的 PrevLogIndex，虽然对于 Leadership 确认来说，
 		// 只要对方认可 Term 即可（即使 Log 不一致返回 false，只要 Term 没变也算确认）。
-		nextIdx, ok := r.nextIndex[pid]
-		if !ok || nextIdx == 0 {
+		nextIDx, ok := r.nextIndex[pid]
+		if !ok || nextIDx == 0 {
 			// 防御性编程：如果 nextIndex 未初始化或为 0，避免下溢。
 			// 正常情况下 nextIndex 至少为 1 (FirstLogIndex)。
 			// 在测试中，如果手动构造 Raft 对象且未初始化 nextIndex，可能会触发此情况。
-			log.Printf("[WARNING] Node %d found invalid nextIndex for peer %d: %d. Defaulting to 1.", r.id, pid, nextIdx)
-			nextIdx = 1
+			log.Printf("[WARNING] Node %d found invalid nextIndex for peer %d: %d. Defaulting to 1.", r.id, pid, nextIDx)
+			nextIDx = 1
 		}
-		prevLogIndex := nextIdx - 1
+		prevLogIndex := nextIDx - 1
 		prevLogTerm, _ := r.getLogTerm(prevLogIndex) // 如果获取失败，默认为 0 也可以
 
 		// 构造空日志的 AppendEntries 作为心跳
-		args := param.NewAppendEntriesArgs(term, leaderId, prevLogIndex, prevLogTerm, r.commitIndex, nil)
+		args := param.NewAppendEntriesArgs(term, leaderID, prevLogIndex, prevLogTerm, r.commitIndex, nil)
 		requests = append(requests, hbRequest{pid, args})
 	}
 	r.mu.Unlock()
@@ -357,12 +367,12 @@ func (r *Raft) confirmLeadership() bool {
 			} else {
 				ackChan <- false
 			}
-		}(req.peerId, req.args)
+		}(req.peerID, req.args)
 	}
 
 	// 统计票数
 	votes := 1 // 自己算一票
-	majority := len(peerIds)/2 + 1
+	majority := len(peerIDs)/2 + 1
 
 	// 设置一个较短的超时时间，避免读请求无限阻塞
 	timeout := time.After(electionTimeout)
@@ -375,7 +385,7 @@ func (r *Raft) confirmLeadership() bool {
 			}
 		case <-timeout:
 			// 超时未集齐多数派
-			log.Printf("[ReadIndex] Node %d timed out waiting for heartbeat quorum.", leaderId)
+			log.Printf("[ReadIndex] Node %d timed out waiting for heartbeat quorum.", leaderID)
 			return false
 		}
 
@@ -395,10 +405,10 @@ func (r *Raft) handleWriteRequest(args *param.ClientArgs, reply *param.ClientRep
 	}
 
 	// 2. 将命令提交到 Raft 日志，并同步等待其被状态机应用。
-	result, ok, leaderId := r.Commit(args.Command)
+	result, ok, leaderID := r.Commit(args.Command)
 
 	// 3. 根据提交和等待的结果，最终填充客户端的响应。
-	r.finalizeClientReply(args, reply, result, ok, leaderId)
+	r.finalizeClientReply(args, reply, result, ok, leaderID)
 
 	return nil
 }
@@ -493,7 +503,7 @@ func (r *Raft) Commit(command any) (any, bool, int) {
 }
 
 // finalizeClientReply 负责根据执行结果，最终构建给客户端的响应。
-func (r *Raft) finalizeClientReply(args *param.ClientArgs, reply *param.ClientReply, result any, ok bool, leaderId int) {
+func (r *Raft) finalizeClientReply(args *param.ClientArgs, reply *param.ClientReply, result any, ok bool, leaderID int) {
 	if ok {
 		// 命令成功应用。
 		r.mu.Lock()
@@ -506,7 +516,7 @@ func (r *Raft) finalizeClientReply(args *param.ClientArgs, reply *param.ClientRe
 		reply.Success = false
 		if !r.isLeader() {
 			reply.NotLeader = true
-			reply.LeaderHint = leaderId
+			reply.LeaderHint = leaderID
 		}
 	}
 }
@@ -516,7 +526,7 @@ func (r *Raft) Submit(command any) (uint64, uint64, bool) {
 	r.mu.Lock()
 
 	// 1. 检查当前节点是否为 Leader。
-	if r.state != param.Leader {
+	if r.state != Leader {
 		r.mu.Unlock()
 		return 0, 0, false
 	}
@@ -533,11 +543,11 @@ func (r *Raft) Submit(command any) (uint64, uint64, bool) {
 	r.mu.Unlock()
 
 	// 4. 在没有持有锁的情况下，安全地启动广播 goroutine。
-	for _, peerId := range peersToNotify {
-		if peerId == r.id {
+	for _, peerID := range peersToNotify {
+		if peerID == r.id {
 			continue
 		}
-		go r.sendAppendEntries(peerId)
+		go r.sendAppendEntries(peerID)
 	}
 
 	return newLogEntry.Index, newLogEntry.Term, true
@@ -550,7 +560,7 @@ func (r *Raft) ChangeConfig(newPeerIDs []int) (uint64, uint64, bool) {
 	r.mu.Lock()
 
 	// 1. 前置检查：确保当前是 Leader 并且没有正在进行的成员变更。
-	if r.inJointConsensus || r.state != param.Leader {
+	if r.inJointConsensus || r.state != Leader {
 		r.mu.Unlock()
 		return 0, 0, false // 变更已在进行中
 	}
@@ -564,16 +574,16 @@ func (r *Raft) ChangeConfig(newPeerIDs []int) (uint64, uint64, bool) {
 
 	// 3. 提议成功后，Leader 自身立即进入“联合共识”状态。
 	r.inJointConsensus = true
-	r.newPeerIds = newPeerIDs
+	r.newPeerIDs = newPeerIDs
 
 	// Initialize tracking state for new peers
-	for _, peerId := range newPeerIDs {
-		if _, ok := r.nextIndex[peerId]; !ok {
-			r.nextIndex[peerId] = newLogEntry.Index + 1
-			r.matchIndex[peerId] = 0
-			log.Printf("[Config Change] Initialized nextIndex[%d] = %d", peerId, r.nextIndex[peerId])
+	for _, peerID := range newPeerIDs {
+		if _, ok := r.nextIndex[peerID]; !ok {
+			r.nextIndex[peerID] = newLogEntry.Index + 1
+			r.matchIndex[peerID] = 0
+			log.Printf("[Config Change] Initialized nextIndex[%d] = %d", peerID, r.nextIndex[peerID])
 		} else {
-			log.Printf("[Config Change] nextIndex[%d] already exists: %d", peerId, r.nextIndex[peerId])
+			log.Printf("[Config Change] nextIndex[%d] already exists: %d", peerID, r.nextIndex[peerID])
 		}
 	}
 
@@ -581,11 +591,11 @@ func (r *Raft) ChangeConfig(newPeerIDs []int) (uint64, uint64, bool) {
 	r.mu.Unlock()
 
 	// 4. 在没有持有锁的情况下，安全地广播。
-	for _, peerId := range peersToNotify {
-		if peerId == r.id {
+	for _, peerID := range peersToNotify {
+		if peerID == r.id {
 			continue
 		}
-		go r.sendAppendEntries(peerId)
+		go r.sendAppendEntries(peerID)
 	}
 
 	return newLogEntry.Index, newLogEntry.Term, true
@@ -594,11 +604,11 @@ func (r *Raft) ChangeConfig(newPeerIDs []int) (uint64, uint64, bool) {
 // getAllPeerIDs is a helper to get all unique peers from both configurations.
 func (r *Raft) getAllPeerIDs() []int {
 	peerSet := make(map[int]struct{})
-	for _, p := range r.peerIds {
+	for _, p := range r.peerIDs {
 		peerSet[p] = struct{}{}
 	}
 	if r.inJointConsensus {
-		for _, p := range r.newPeerIds {
+		for _, p := range r.newPeerIDs {
 			peerSet[p] = struct{}{}
 		}
 	}
@@ -615,7 +625,7 @@ func (r *Raft) getAllPeerIDs() []int {
 func (r *Raft) becomeFollower(newTerm uint64) error {
 	log.Printf("[State Change] Node %d received higher term %d. Updating term and becoming follower.", r.id, newTerm)
 	r.currentTerm = newTerm
-	r.state = param.Follower
+	r.state = Follower
 	r.votedFor = -1 // 进入新任期时，重置投票记录。
 
 	// 每当我们成为 Follower（无论何种原因），
@@ -680,18 +690,18 @@ func (r *Raft) initLeaderState() {
 	if err != nil {
 		log.Printf("[ERROR] Node %d (new leader) failed to get last log index to initialize state: %v", r.id, err)
 		// This is a critical error, might need to step down.
-		r.state = param.Follower
+		r.state = Follower
 		return
 	}
 
 	r.nextIndex = make(map[int]uint64)
 	r.matchIndex = make(map[int]uint64)
-	for _, peerId := range r.getAllPeerIDs() {
-		if peerId == r.id {
+	for _, peerID := range r.getAllPeerIDs() {
+		if peerID == r.id {
 			continue
 		}
-		r.nextIndex[peerId] = lastLogIndex + 1
-		r.matchIndex[peerId] = 0
+		r.nextIndex[peerID] = lastLogIndex + 1
+		r.matchIndex[peerID] = 0
 	}
 }
 
@@ -711,7 +721,7 @@ func (r *Raft) startHeartbeat() {
 			<-ticker.C
 
 			r.mu.Lock()
-			if r.state != param.Leader {
+			if r.state != Leader {
 				r.mu.Unlock()
 				return
 			}
@@ -724,10 +734,10 @@ func (r *Raft) startHeartbeat() {
 // broadcastHeartbeat is a helper to send AppendEntries to all peers.
 func (r *Raft) broadcastHeartbeat() {
 	// This method must be called with the lock held.
-	for _, peerId := range r.getAllPeerIDs() {
-		if peerId == r.id {
+	for _, peerID := range r.getAllPeerIDs() {
+		if peerID == r.id {
 			continue
 		}
-		go r.sendAppendEntries(peerId)
+		go r.sendAppendEntries(peerID)
 	}
 }

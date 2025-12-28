@@ -23,18 +23,18 @@ const (
 //   - 日志复制（Log Replication）: 当有新的日志条目时，它会将这些条目通过 AppendEntries RPC 发送给 Follower。
 //   - 处理响应: 根据 Follower 的响应来更新 nextIndex 和 matchIndex。
 //     如果 Follower 的日志与 Leader 不一致，它会根据响应中的冲突信息 (ConflictIndex, ConflictTerm) 回退 nextIndex 并重试，直到日志达成一致。
-func (r *Raft) sendAppendEntries(peerId int) {
+func (r *Raft) sendAppendEntries(peerID int) {
 	// 1. 决定需要对该 Follower 执行哪种同步操作。
-	action := r.determineReplicationAction(peerId)
+	action := r.determineReplicationAction(peerID)
 
 	// 2. 根据决策结果，执行相应的操作。
 	switch action {
 	case actionSendLogs:
 		// 如果决定发送日志，则调用专门负责日志复制的函数。
-		r.replicateLogsToPeer(peerId)
+		r.replicateLogsToPeer(peerID)
 	case actionSendSnapshot:
 		// 如果决定发送快照，则调用已有的快照发送函数。
-		r.sendSnapshot(peerId)
+		r.sendSnapshot(peerID)
 	case actionDoNothing:
 		// 如果无需任何操作，则直接返回。
 		return
@@ -43,12 +43,12 @@ func (r *Raft) sendAppendEntries(peerId int) {
 
 // determineReplicationAction 检查并决定 Leader 应对一个 Follower 采取何种同步措施。
 // 它封装了所有的前置检查逻辑。
-func (r *Raft) determineReplicationAction(peerId int) replicationAction {
+func (r *Raft) determineReplicationAction(peerID int) replicationAction {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// 检查一：如果当前节点不再是 Leader，则不执行任何操作。
-	if r.state != param.Leader {
+	if r.state != Leader {
 		return actionDoNothing
 	}
 
@@ -61,8 +61,8 @@ func (r *Raft) determineReplicationAction(peerId int) replicationAction {
 
 	// 如果 Follower 需要的下一条日志索引小于 Leader 的第一条日志索引，
 	// 说明该日志已被压缩，必须发送快照。
-	if r.nextIndex[peerId] < firstLogIndex {
-		log.Printf("[Snapshot] Node %d log for peer %d (nextIndex=%d) is behind compacted log (firstLogIndex=%d). Decided to send snapshot.", r.id, peerId, r.nextIndex[peerId], firstLogIndex)
+	if r.nextIndex[peerID] < firstLogIndex {
+		log.Printf("[Snapshot] Node %d log for peer %d (nextIndex=%d) is behind compacted log (firstLogIndex=%d). Decided to send snapshot.", r.id, peerID, r.nextIndex[peerID], firstLogIndex)
 		return actionSendSnapshot
 	}
 
@@ -72,12 +72,12 @@ func (r *Raft) determineReplicationAction(peerId int) replicationAction {
 
 // replicateLogsToPeer 封装了向单个 Peer 发送 AppendEntries RPC 的流程。
 // 为了实现流水线，这个函数会异步地发起 RPC，而不是阻塞等待。
-func (r *Raft) replicateLogsToPeer(peerId int) {
+func (r *Raft) replicateLogsToPeer(peerID int) {
 	r.mu.Lock()
 	// 准备 RPC 请求参数。
-	args, err := r.prepareAppendEntriesArgs(peerId)
+	args, err := r.prepareAppendEntriesArgs(peerID)
 	if err != nil {
-		log.Printf("[ERROR] Node %d failed to prepare AppendEntries args for peer %d: %v", r.id, peerId, err)
+		log.Printf("[ERROR] Node %d failed to prepare AppendEntries args for peer %d: %v", r.id, peerID, err)
 		r.mu.Unlock()
 		return
 	}
@@ -89,21 +89,21 @@ func (r *Raft) replicateLogsToPeer(peerId int) {
 	// 而可以继续检查并发送下一批日志，从而实现流水线效果。
 	go func() {
 		reply := param.NewAppendEntriesReply()
-		if err := r.trans.SendAppendEntries(strconv.Itoa(peerId), args, reply); err != nil {
-			log.Printf("[Log Replication] Node %d failed to send AppendEntries to %d: %s", r.id, peerId, err.Error())
+		if err := r.trans.SendAppendEntries(strconv.Itoa(peerID), args, reply); err != nil {
+			log.Printf("[Log Replication] Node %d failed to send AppendEntries to %d: %s", r.id, peerID, err.Error())
 			return
 		}
 
 		// 在 RPC 完成后，在后台处理响应。
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		r.processAppendEntriesReply(peerId, args, reply, savedCurrentTerm)
+		r.processAppendEntriesReply(peerID, args, reply, savedCurrentTerm)
 	}()
 }
 
 // prepareAppendEntriesArgs 负责构建发送给对等节点的 AppendEntries RPC 参数。
-func (r *Raft) prepareAppendEntriesArgs(peerId int) (*param.AppendEntriesArgs, error) {
-	prevLogIndex := r.nextIndex[peerId] - 1
+func (r *Raft) prepareAppendEntriesArgs(peerID int) (*param.AppendEntriesArgs, error) {
+	prevLogIndex := r.nextIndex[peerID] - 1
 	prevLogTerm, err := r.getLogTerm(prevLogIndex)
 	if err != nil {
 		log.Printf("[ERROR] Node %d failed to get log term at index %d: %v", r.id, prevLogIndex, err)
@@ -115,9 +115,9 @@ func (r *Raft) prepareAppendEntriesArgs(peerId int) (*param.AppendEntriesArgs, e
 	if err != nil {
 		return nil, err
 	}
-	if r.nextIndex[peerId] <= lastLogIndex {
+	if r.nextIndex[peerID] <= lastLogIndex {
 		// 在生产环境中，存储层应提供一个高效的范围查询方法来代替循环。
-		for i := r.nextIndex[peerId]; i <= lastLogIndex; i++ {
+		for i := r.nextIndex[peerID]; i <= lastLogIndex; i++ {
 			entry, err := r.store.GetEntry(i)
 			if err != nil || entry == nil {
 				log.Printf("[ERROR] Node %d failed to get entry %d from store: %v", r.id, i, err)
@@ -133,13 +133,13 @@ func (r *Raft) prepareAppendEntriesArgs(peerId int) (*param.AppendEntriesArgs, e
 
 // processAppendEntriesReply 负责处理从对等节点返回的 AppendEntries 响应。
 // 此函数必须在持有锁的情况下被调用。
-func (r *Raft) processAppendEntriesReply(peerId int, args *param.AppendEntriesArgs, reply *param.AppendEntriesReply, savedCurrentTerm uint64) {
-	if r.currentTerm != savedCurrentTerm || r.state != param.Leader {
+func (r *Raft) processAppendEntriesReply(peerID int, args *param.AppendEntriesArgs, reply *param.AppendEntriesReply, savedCurrentTerm uint64) {
+	if r.currentTerm != savedCurrentTerm || r.state != Leader {
 		return
 	}
 
 	if reply.Term > r.currentTerm {
-		log.Printf("[Log Replication] Node %d found higher term %d from peer %d, becomes Follower", r.id, reply.Term, peerId)
+		log.Printf("[Log Replication] Node %d found higher term %d from peer %d, becomes Follower", r.id, reply.Term, peerID)
 		err := r.becomeFollower(reply.Term)
 		if err != nil {
 			log.Printf("[ERROR] Node %d failed to persist state when stepping down to Follower: %v", r.id, err)
@@ -148,44 +148,44 @@ func (r *Raft) processAppendEntriesReply(peerId int, args *param.AppendEntriesAr
 		return
 	}
 
-	if r.state == param.Leader {
+	if r.state == Leader {
 		// 无论 Success 是 true 还是 false，
 		// 只要任期匹配，就说明 Follower 确认了我们的 Leader 地位。
 		// 这足以用于 ReadIndex 的租约。
-		r.lastAck[peerId] = time.Now()
+		r.lastAck[peerID] = time.Now()
 
 		if reply.Success {
-			r.handleSuccessfulAppendEntries(peerId, args)
+			r.handleSuccessfulAppendEntries(peerID, args)
 		} else {
-			r.handleFailedAppendEntries(peerId, reply)
+			r.handleFailedAppendEntries(peerID, reply)
 		}
 	}
 }
 
 // handleSuccessfulAppendEntries 在收到成功的 AppendEntries 响应后更新 Leader 的状态。
-func (r *Raft) handleSuccessfulAppendEntries(peerId int, args *param.AppendEntriesArgs) {
+func (r *Raft) handleSuccessfulAppendEntries(peerID int, args *param.AppendEntriesArgs) {
 	newNextIndex := args.PrevLogIndex + uint64(len(args.Entries)) + 1
-	r.nextIndex[peerId] = newNextIndex
-	r.matchIndex[peerId] = newNextIndex - 1
+	r.nextIndex[peerID] = newNextIndex
+	r.matchIndex[peerID] = newNextIndex - 1
 
 	r.updateCommitIndex()
 }
 
 // handleFailedAppendEntries 在收到失败的 AppendEntries 响应后调整 nextIndex。
-func (r *Raft) handleFailedAppendEntries(peerId int, reply *param.AppendEntriesReply) {
-	log.Printf("[Log Replication] Node %d rejected AppendEntries from leader %d (ConflictIndex=%d, ConflictTerm=%d)", peerId, r.id, reply.ConflictIndex, reply.ConflictTerm)
+func (r *Raft) handleFailedAppendEntries(peerID int, reply *param.AppendEntriesReply) {
+	log.Printf("[Log Replication] Node %d rejected AppendEntries from leader %d (ConflictIndex=%d, ConflictTerm=%d)", peerID, r.id, reply.ConflictIndex, reply.ConflictTerm)
 
 	// 根据论文中的优化策略，快速回退 nextIndex。
 	if reply.ConflictIndex > 0 {
-		r.nextIndex[peerId] = reply.ConflictIndex
+		r.nextIndex[peerID] = reply.ConflictIndex
 	} else {
 		// 如果 ConflictIndex 为 0（异常情况），则回退一步
-		if r.nextIndex[peerId] > 1 {
-			r.nextIndex[peerId]--
+		if r.nextIndex[peerID] > 1 {
+			r.nextIndex[peerID]--
 		}
 	}
 
-	go r.sendAppendEntries(peerId)
+	go r.sendAppendEntries(peerID)
 }
 
 // updateCommitIndex 检查 Leader 是否可以推进其 commitIndex。
@@ -232,12 +232,12 @@ func (r *Raft) isReplicatedByMajority(index uint64) bool {
 	// 在普通模式下，只需计算旧配置的多数派。
 	// Leader 自身永远是匹配的。
 	matchCountOld := 1
-	for _, peerId := range r.peerIds {
-		if r.matchIndex[peerId] >= index {
+	for _, peerID := range r.peerIDs {
+		if r.matchIndex[peerID] >= index {
 			matchCountOld++
 		}
 	}
-	majorityOld := (len(r.peerIds) / 2) + 1
+	majorityOld := (len(r.peerIDs) / 2) + 1
 
 	if !r.inJointConsensus {
 		return matchCountOld >= majorityOld
@@ -246,15 +246,15 @@ func (r *Raft) isReplicatedByMajority(index uint64) bool {
 	// 在联合共识模式下，需要同时满足新旧配置的多数派。
 	matchCountNew := 0
 	// 检查 Leader 自身是否在新配置中。
-	if _, isNew := findPeer(r.id, r.newPeerIds); isNew {
+	if _, isNew := findPeer(r.id, r.newPeerIDs); isNew {
 		matchCountNew = 1
 	}
-	for _, peerId := range r.newPeerIds {
-		if r.matchIndex[peerId] >= index {
+	for _, peerID := range r.newPeerIDs {
+		if r.matchIndex[peerID] >= index {
 			matchCountNew++
 		}
 	}
-	majorityNew := (len(r.newPeerIds) / 2) + 1
+	majorityNew := (len(r.newPeerIDs) / 2) + 1
 
 	return matchCountOld >= majorityOld && matchCountNew >= majorityNew
 }
@@ -381,7 +381,7 @@ func (r *Raft) appendAndStoreEntries(args *param.AppendEntriesArgs) error {
 			log.Printf("[ERROR] Node %d failed to append entries to store: %v", r.id, err)
 			return err
 		}
-		log.Printf("[Log Replication] Node %d accepted and stored %d new entries from leader %d", r.id, len(args.Entries), args.LeaderId)
+		log.Printf("[Log Replication] Node %d accepted and stored %d new entries from leader %d", r.id, len(args.Entries), args.LeaderID)
 	}
 	return nil
 }
@@ -496,17 +496,17 @@ func (r *Raft) applyConfigChange(cmd param.ConfigChangeCommand, entryIndex uint6
 	if !r.inJointConsensus {
 		// --- Phase 1: 进入联合共识 (C_old,new) ---
 		r.inJointConsensus = true
-		r.newPeerIds = cmd.NewPeerIDs
+		r.newPeerIDs = cmd.NewPeerIDs
 		log.Printf("[Config Change] Node %d entering joint consensus at index %d.", r.id, entryIndex)
 
 		// 如果当前节点是 Leader，它有责任立即提交第二阶段的配置日志 (C_new)，以完成变更。
-		if r.state == param.Leader {
+		if r.state == Leader {
 			// 初始化新加入节点的 nextIndex 和 matchIndex
 			lastLogIndex, _ := r.store.LastLogIndex()
-			for _, peerId := range r.newPeerIds {
-				if _, ok := r.nextIndex[peerId]; !ok {
-					r.nextIndex[peerId] = lastLogIndex + 1
-					r.matchIndex[peerId] = 0
+			for _, peerID := range r.newPeerIDs {
+				if _, ok := r.nextIndex[peerID]; !ok {
+					r.nextIndex[peerID] = lastLogIndex + 1
+					r.matchIndex[peerID] = 0
 				}
 			}
 			r.proposeNewConfigEntry()
@@ -514,15 +514,15 @@ func (r *Raft) applyConfigChange(cmd param.ConfigChangeCommand, entryIndex uint6
 	} else {
 		// --- Phase 2: 提交新配置 (C_new) ---
 		// 此时联合共识结束，节点切换到仅使用新配置。
-		r.peerIds = r.newPeerIds
-		r.newPeerIds = nil
+		r.peerIDs = r.newPeerIDs
+		r.newPeerIDs = nil
 		r.inJointConsensus = false
 		log.Printf("[Config Change] Node %d has transitioned to new configuration at index %d.", r.id, entryIndex)
 
 		// 检查自己是否还属于新配置。
 		// 如果 Leader 发现自己被移除了，必须立即“退位” (Step Down)。
-		_, exists := findPeer(r.id, r.peerIds)
-		if !exists && r.state == param.Leader {
+		_, exists := findPeer(r.id, r.peerIDs)
+		if !exists && r.state == Leader {
 			log.Printf("[Config Change] Leader %d detected it is NOT in the new configuration. Stepping down.", r.id)
 
 			// 自动降级为 Follower。
@@ -550,7 +550,7 @@ func (r *Raft) applyStateMachineCommand(entry param.LogEntry) {
 
 // proposeNewConfigEntry 是 Leader 用于提交 C_new（最终配置）日志条目的辅助函数。
 func (r *Raft) proposeNewConfigEntry() {
-	configCmd := param.NewConfigChangeCommand(r.newPeerIds)
+	configCmd := param.NewConfigChangeCommand(r.newPeerIDs)
 	lastIndex, err := r.store.LastLogIndex()
 	if err != nil {
 		log.Printf("[ERROR] Leader %d failed to get last log index for C_new entry: %v", r.id, err)

@@ -507,7 +507,7 @@ func (x *InstallSnapshotResponse) GetTerm() uint64 {
 
 type ClientRequestRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClientId      int64                  `protobuf:"varint,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	ClientId      int64                  `protobuf:"varint,1,opt,name=client_id,json=ClientID,proto3" json:"client_id,omitempty"`
 	SequenceNum   int64                  `protobuf:"varint,2,opt,name=sequence_num,json=sequenceNum,proto3" json:"sequence_num,omitempty"`
 	Command       []byte                 `protobuf:"bytes,3,opt,name=command,proto3" json:"command,omitempty"` // Gob encoded
 	unknownFields protoimpl.UnknownFields
@@ -675,7 +675,7 @@ const file_transport_grpc_pb_raft_proto_rawDesc = "" +
 	"\x17InstallSnapshotResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\"p\n" +
 	"\x14ClientRequestRequest\x12\x1b\n" +
-	"\tclient_id\x18\x01 \x01(\x03R\bclientId\x12!\n" +
+	"\tclient_id\x18\x01 \x01(\x03R\bClientID\x12!\n" +
 	"\fsequence_num\x18\x02 \x01(\x03R\vsequenceNum\x12\x18\n" +
 	"\acommand\x18\x03 \x01(\fR\acommand\"\x89\x01\n" +
 	"\x15ClientRequestResponse\x12\x18\n" +

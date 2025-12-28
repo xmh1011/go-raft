@@ -4,62 +4,24 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/xmh1011/go-raft/param"
+	"github.com/xmh1011/go-raft/raft/api"
 )
-
-// mockRPCServer 是 raft.RaftRPC 接口的一个模拟实现，用于测试。
-type mockRPCServer struct {
-	// lastArgs 记录最后一次被调用时传入的参数
-	lastArgs any
-	// replyToReturn 是我们预设的、希望 mock 方法写入到 reply 参数中的内容
-	replyToReturn any
-	// errorToReturn 是我们预设的、希望 mock 方法返回的错误
-	errorToReturn error
-}
-
-func (m *mockRPCServer) RequestVote(args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
-	m.lastArgs = args
-	if m.replyToReturn != nil {
-		// 将预设的回复内容拷贝给调用者提供的 reply 指针
-		*reply = *(m.replyToReturn.(*param.RequestVoteReply))
-	}
-	return m.errorToReturn
-}
-
-func (m *mockRPCServer) AppendEntries(args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
-	m.lastArgs = args
-	if m.replyToReturn != nil {
-		*reply = *(m.replyToReturn.(*param.AppendEntriesReply))
-	}
-	return m.errorToReturn
-}
-
-func (m *mockRPCServer) InstallSnapshot(args *param.InstallSnapshotArgs, reply *param.InstallSnapshotReply) error {
-	m.lastArgs = args
-	if m.replyToReturn != nil {
-		*reply = *(m.replyToReturn.(*param.InstallSnapshotReply))
-	}
-	return m.errorToReturn
-}
-
-func (m *mockRPCServer) ClientRequest(args *param.ClientArgs, reply *param.ClientReply) error {
-	m.lastArgs = args
-	if m.replyToReturn != nil {
-		*reply = *(m.replyToReturn.(*param.ClientReply))
-	}
-	return m.errorToReturn
-}
 
 func TestInMemoryTransport(t *testing.T) {
 	t.Run("New, Connect, and Disconnect", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
 		trans := NewTransport("local")
 		assert.NotNil(t, trans, "NewTransport should not return nil")
 		assert.NotNil(t, trans.peers, "peers map should be initialized")
 		assert.Empty(t, trans.peers, "peers map should be initially empty")
 
-		mockPeer := &mockRPCServer{}
+		mockPeer := api.NewMockRaftService(ctrl)
 		trans.Connect("peer1", mockPeer)
 		assert.Len(t, trans.peers, 1, "peers map should have 1 entry after connect")
 		assert.Contains(t, trans.peers, "peer1", "peers map should contain the new peer")
@@ -69,47 +31,68 @@ func TestInMemoryTransport(t *testing.T) {
 	})
 
 	t.Run("Send successful RPC calls", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
 		trans := NewTransport("local")
-		mockPeer := &mockRPCServer{}
+		mockPeer := api.NewMockRaftService(ctrl)
 		trans.Connect("peer1", mockPeer)
 
 		// --- Test SendRequestVote ---
-		mockPeer.replyToReturn = &param.RequestVoteReply{Term: 1, VoteGranted: true}
-		mockPeer.errorToReturn = nil
-		argsRV := &param.RequestVoteArgs{Term: 1, CandidateId: 10}
+		argsRV := &param.RequestVoteArgs{Term: 1, CandidateID: 10}
 		replyRV := &param.RequestVoteReply{}
+		mockPeer.EXPECT().RequestVote(gomock.Eq(argsRV), gomock.Any()).
+			DoAndReturn(func(_ *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
+				reply.Term = 1
+				reply.VoteGranted = true
+				return nil
+			}).Times(1)
+
 		err := trans.SendRequestVote("peer1", argsRV, replyRV)
 		assert.NoError(t, err, "SendRequestVote should not return an error on success")
-		assert.Equal(t, argsRV, mockPeer.lastArgs, "mock server should have received the correct args for RequestVote")
 		assert.Equal(t, uint64(1), replyRV.Term, "reply should be filled correctly for RequestVote")
 		assert.True(t, replyRV.VoteGranted, "reply should be filled correctly for RequestVote")
 
 		// --- Test SendAppendEntries ---
-		mockPeer.replyToReturn = &param.AppendEntriesReply{Term: 2, Success: true}
 		argsAE := &param.AppendEntriesArgs{Term: 2}
 		replyAE := &param.AppendEntriesReply{}
+		mockPeer.EXPECT().AppendEntries(gomock.Eq(argsAE), gomock.Any()).
+			DoAndReturn(func(_ *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
+				reply.Term = 2
+				reply.Success = true
+				return nil
+			}).Times(1)
+
 		err = trans.SendAppendEntries("peer1", argsAE, replyAE)
 		assert.NoError(t, err)
-		assert.Equal(t, argsAE, mockPeer.lastArgs)
 		assert.Equal(t, uint64(2), replyAE.Term)
 		assert.True(t, replyAE.Success)
 
 		// --- Test SendInstallSnapshot ---
-		mockPeer.replyToReturn = &param.InstallSnapshotReply{Term: 3}
 		argsIS := &param.InstallSnapshotArgs{Term: 3}
 		replyIS := &param.InstallSnapshotReply{}
+		mockPeer.EXPECT().InstallSnapshot(gomock.Eq(argsIS), gomock.Any()).
+			DoAndReturn(func(_ *param.InstallSnapshotArgs, reply *param.InstallSnapshotReply) error {
+				reply.Term = 3
+				return nil
+			}).Times(1)
+
 		err = trans.SendInstallSnapshot("peer1", argsIS, replyIS)
 		assert.NoError(t, err)
-		assert.Equal(t, argsIS, mockPeer.lastArgs)
 		assert.Equal(t, uint64(3), replyIS.Term)
 
 		// --- Test SendClientRequest ---
-		mockPeer.replyToReturn = &param.ClientReply{Success: true, Result: "OK"}
 		argsCR := &param.ClientArgs{Command: "SET"}
 		replyCR := &param.ClientReply{}
+		mockPeer.EXPECT().ClientRequest(gomock.Eq(argsCR), gomock.Any()).
+			DoAndReturn(func(_ *param.ClientArgs, reply *param.ClientReply) error {
+				reply.Success = true
+				reply.Result = "OK"
+				return nil
+			}).Times(1)
+
 		err = trans.SendClientRequest("peer1", argsCR, replyCR)
 		assert.NoError(t, err)
-		assert.Equal(t, argsCR, mockPeer.lastArgs)
 		assert.True(t, replyCR.Success)
 		assert.Equal(t, "OK", replyCR.Result)
 	})
@@ -123,11 +106,15 @@ func TestInMemoryTransport(t *testing.T) {
 	})
 
 	t.Run("Send RPC where peer returns an error", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
 		trans := NewTransport("local")
-		mockPeer := &mockRPCServer{}
-		expectedErr := errors.New("mock RPC failure")
-		mockPeer.errorToReturn = expectedErr
+		mockPeer := api.NewMockRaftService(ctrl)
 		trans.Connect("peer1", mockPeer)
+
+		expectedErr := errors.New("mock RPC failure")
+		mockPeer.EXPECT().RequestVote(gomock.Any(), gomock.Any()).Return(expectedErr).Times(1)
 
 		err := trans.SendRequestVote("peer1", &param.RequestVoteArgs{}, &param.RequestVoteReply{})
 		assert.Error(t, err, "transport should propagate the error from the peer")

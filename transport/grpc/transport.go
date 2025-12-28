@@ -16,7 +16,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/xmh1011/go-raft/param"
-	"github.com/xmh1011/go-raft/raft/rpc"
+	"github.com/xmh1011/go-raft/raft/api"
 	"github.com/xmh1011/go-raft/transport/grpc/pb"
 )
 
@@ -26,7 +26,7 @@ type Transport struct {
 	listener  net.Listener
 	localAddr string
 
-	raft       rpc.Server
+	raft       api.RaftService
 	grpcServer *grpc.Server
 	mu         sync.RWMutex
 	conns      map[string]*grpc.ClientConn
@@ -75,7 +75,7 @@ func (t *Transport) SetPeers(peers map[int]string) {
 }
 
 // RegisterRaft registers the Raft RPC server.
-func (t *Transport) RegisterRaft(raftInstance rpc.Server) {
+func (t *Transport) RegisterRaft(raftInstance api.RaftService) {
 	t.raft = raftInstance
 }
 
@@ -152,7 +152,7 @@ func (t *Transport) getPeerClient(targetID string) (pb.RaftServiceClient, error)
 		return client, nil
 	}
 
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +201,7 @@ func (t *Transport) SendRequestVote(target string, req *param.RequestVoteArgs, r
 
 	pbReq := &pb.RequestVoteRequest{
 		Term:         req.Term,
-		CandidateId:  int64(req.CandidateId),
+		CandidateId:  int64(req.CandidateID),
 		LastLogIndex: req.LastLogIndex,
 		LastLogTerm:  req.LastLogTerm,
 		PreVote:      req.PreVote,
@@ -217,7 +217,7 @@ func (t *Transport) SendRequestVote(target string, req *param.RequestVoteArgs, r
 
 	resp.Term = pbResp.Term
 	resp.VoteGranted = pbResp.VoteGranted
-	resp.CandidateId = int(pbResp.CandidateId)
+	resp.CandidateID = int(pbResp.CandidateId)
 
 	return nil
 }
@@ -243,7 +243,7 @@ func (t *Transport) SendAppendEntries(target string, req *param.AppendEntriesArg
 
 	pbReq := &pb.AppendEntriesRequest{
 		Term:         req.Term,
-		LeaderId:     int64(req.LeaderId),
+		LeaderId:     int64(req.LeaderID),
 		PrevLogIndex: req.PrevLogIndex,
 		PrevLogTerm:  req.PrevLogTerm,
 		Entries:      pbEntries,
@@ -332,12 +332,10 @@ func (t *Transport) SendClientRequest(target string, req *param.ClientArgs, resp
 	return nil
 }
 
-// --- Server side implementation ---
-
 func (t *Transport) RequestVote(ctx context.Context, req *pb.RequestVoteRequest) (*pb.RequestVoteResponse, error) {
 	args := &param.RequestVoteArgs{
 		Term:         req.Term,
-		CandidateId:  int(req.CandidateId),
+		CandidateID:  int(req.CandidateId),
 		LastLogIndex: req.LastLogIndex,
 		LastLogTerm:  req.LastLogTerm,
 		PreVote:      req.PreVote,
@@ -351,7 +349,7 @@ func (t *Transport) RequestVote(ctx context.Context, req *pb.RequestVoteRequest)
 	return &pb.RequestVoteResponse{
 		Term:        reply.Term,
 		VoteGranted: reply.VoteGranted,
-		CandidateId: int64(reply.CandidateId),
+		CandidateId: int64(reply.CandidateID),
 	}, nil
 }
 
@@ -371,7 +369,7 @@ func (t *Transport) AppendEntries(ctx context.Context, req *pb.AppendEntriesRequ
 
 	args := &param.AppendEntriesArgs{
 		Term:         req.Term,
-		LeaderId:     int(req.LeaderId),
+		LeaderID:     int(req.LeaderId),
 		PrevLogIndex: req.PrevLogIndex,
 		PrevLogTerm:  req.PrevLogTerm,
 		Entries:      entries,

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/xmh1011/go-raft/param"
-	raftRpc "github.com/xmh1011/go-raft/raft/rpc"
+	"github.com/xmh1011/go-raft/raft/api"
 )
 
 const (
@@ -24,7 +24,7 @@ type Transport struct {
 	listener  net.Listener
 	localAddr string // 实际监听的地址 (IP:Port)
 
-	raft   raftRpc.Server
+	raft   api.RaftService
 	server *rpc.Server
 
 	mu        sync.RWMutex
@@ -33,7 +33,6 @@ type Transport struct {
 }
 
 // NewTransport 创建一个新的 Transport 实例并立即开始监听端口。
-// 这样可以立即获取分配的端口号（如果使用 :0）。
 func NewTransport(listenAddr string) (*Transport, error) {
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
@@ -55,20 +54,15 @@ func (t *Transport) Addr() string {
 }
 
 // SetPeers 设置节点 ID 到地址的映射。
-// 注意：这会重置所有现有的连接缓存，强制下次通信时重新建立连接。
 func (t *Transport) SetPeers(peers map[int]string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// 更新地址映射
-	// 注意：这里我们完全替换映射，而不是合并，以支持删除节点
 	t.resolvers = make(map[int]string)
 	for id, addr := range peers {
 		t.resolvers[id] = addr
 	}
 
-	// 关闭并清除所有现有的客户端连接
-	// 这对于网络分区测试至关重要，确保旧的连接被切断
 	for _, client := range t.peers {
 		client.Close()
 	}
@@ -76,25 +70,23 @@ func (t *Transport) SetPeers(peers map[int]string) {
 }
 
 // RegisterRaft 注册 Raft 实例，用于处理接收到的 RPC 请求。
-func (t *Transport) RegisterRaft(raftInstance raftRpc.Server) {
+func (t *Transport) RegisterRaft(raftInstance api.RaftService) {
 	t.raft = raftInstance
 }
 
 // Start 注册 RPC 服务并开始接受连接。
-// 必须在 RegisterRaft 之后调用。
 func (t *Transport) Start() error {
 	if t.raft == nil {
 		return errors.New("raft instance not registered")
 	}
 
-	// 注册 RPC 服务到我们自己的 server 实例
-	// 注意：这里不需要再 Listen 了，因为 NewTransport 已经 Listen 了
-	err := t.server.Register(&raftRpc.RaftRPC{Raft: t.raft})
+	// 使用一个固定的服务名 "RaftService" 来注册服务，
+	// 这样客户端就可以使用 "RaftService.MethodName" 来调用。
+	err := t.server.RegisterName("RaftService", t.raft)
 	if err != nil {
 		return err
 	}
 
-	// 在后台接受连接
 	go t.acceptConnections()
 
 	log.Printf("[TCPTransport] Service started on %s", t.localAddr)
@@ -106,15 +98,12 @@ func (t *Transport) acceptConnections() {
 	for {
 		conn, err := t.listener.Accept()
 		if err != nil {
-			// 如果监听器关闭了，就退出循环
 			var opErr *net.OpError
 			if errors.As(err, &opErr) && opErr.Err.Error() == "use of closed network connection" {
 				return
 			}
-			// 忽略临时错误
 			continue
 		}
-		// 为每个连接启动一个新的 goroutine 来提供 RPC 服务
 		go t.server.ServeConn(conn)
 	}
 }
@@ -124,7 +113,6 @@ func (t *Transport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// 关闭所有缓存的客户端连接
 	for _, client := range t.peers {
 		client.Close()
 	}
@@ -138,15 +126,8 @@ func (t *Transport) Close() error {
 
 // getPeerAddress 根据 NodeID 获取地址。
 func (t *Transport) getPeerAddress(nodeIDStr string) (string, error) {
-	// 尝试将 nodeIDStr 解析为 int
 	id, err := strconv.Atoi(nodeIDStr)
 	if err != nil {
-		// 如果解析失败，说明传入的可能不是数字 ID，而是直接的地址（虽然在我们的设计中应该是 ID）
-		// 或者是一个非法的 ID。
-		// 在当前的集成测试中，我们传递的是 "127.0.0.1:xxx" 这样的地址作为 target 吗？
-		// 不，Raft 核心传递的是 Peer ID (int) 转换成的 string。
-		// 但是，如果 targetID 本身就是地址（例如在某些测试场景下），我们应该怎么处理？
-		// 按照 Raft 的设计，target 应该是 ID。
 		return "", fmt.Errorf("invalid node id: %s", nodeIDStr)
 	}
 
@@ -154,7 +135,6 @@ func (t *Transport) getPeerAddress(nodeIDStr string) (string, error) {
 	defer t.mu.RUnlock()
 	addr, ok := t.resolvers[id]
 	if !ok {
-		// 如果找不到 ID 对应的地址，说明该节点可能不在配置中，或者被分区了。
 		return "", fmt.Errorf("address not found for node %d", id)
 	}
 	return addr, nil
@@ -162,13 +142,11 @@ func (t *Transport) getPeerAddress(nodeIDStr string) (string, error) {
 
 // getPeerClient 获取或创建一个到目标节点的 RPC 客户端。
 func (t *Transport) getPeerClient(targetID string) (*rpc.Client, error) {
-	// 1. 解析地址
 	addr, err := t.getPeerAddress(targetID)
 	if err != nil {
 		return nil, err
 	}
 
-	// 2. 检查缓存
 	t.mu.RLock()
 	client, ok := t.peers[targetID]
 	t.mu.RUnlock()
@@ -177,17 +155,14 @@ func (t *Transport) getPeerClient(targetID string) (*rpc.Client, error) {
 		return client, nil
 	}
 
-	// 3. 建立新连接
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// 双重检查
 	if client, ok := t.peers[targetID]; ok && client != nil {
 		return client, nil
 	}
 
 	log.Printf("[TCPTransport] Dialing new connection to node %s at %s", targetID, addr)
-	// 设置连接超时
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return nil, err
@@ -204,19 +179,17 @@ func (t *Transport) remoteCall(targetID, method string, args any, reply any, tim
 		return err
 	}
 
-	// 使用 client.Go 实现带超时的 RPC 调用
-	// net/rpc 的 Call 方法是阻塞的且没有超时控制，如果网络分区或对端挂起，会导致调用者永久阻塞。
-	call := client.Go(method, args, reply, nil)
+	fullMethod := "RaftService." + method
+	call := client.Go(fullMethod, args, reply, nil)
 
 	select {
 	case <-call.Done:
 		err = call.Error
-	case <-time.After(timeout): // 使用传入的超时时间
+	case <-time.After(timeout):
 		err = errors.New("rpc call timed out")
 	}
 
 	if err != nil {
-		// 遇到任何 RPC 错误（包括超时），都移除缓存的 client，以便下次重连。
 		t.mu.Lock()
 		if cachedClient, ok := t.peers[targetID]; ok && cachedClient == client {
 			delete(t.peers, targetID)
@@ -230,26 +203,20 @@ func (t *Transport) remoteCall(targetID, method string, args any, reply any, tim
 
 // SendRequestVote 发送 RequestVote RPC 请求。
 func (t *Transport) SendRequestVote(target string, req *param.RequestVoteArgs, resp *param.RequestVoteReply) error {
-	return t.remoteCall(target, "RaftRPC.RequestVote", req, resp, defaultRPCTimeout)
+	return t.remoteCall(target, "RequestVote", req, resp, defaultRPCTimeout)
 }
 
 // SendAppendEntries 发送 AppendEntries RPC 请求。
 func (t *Transport) SendAppendEntries(target string, req *param.AppendEntriesArgs, resp *param.AppendEntriesReply) error {
-	return t.remoteCall(target, "RaftRPC.AppendEntries", req, resp, defaultRPCTimeout)
+	return t.remoteCall(target, "AppendEntries", req, resp, defaultRPCTimeout)
 }
 
 // SendInstallSnapshot 发送 InstallSnapshot RPC 请求。
 func (t *Transport) SendInstallSnapshot(target string, req *param.InstallSnapshotArgs, resp *param.InstallSnapshotReply) error {
-	return t.remoteCall(target, "RaftRPC.InstallSnapshot", req, resp, installSnapshotRPCTimeout)
+	return t.remoteCall(target, "InstallSnapshot", req, resp, installSnapshotRPCTimeout)
 }
 
 // SendClientRequest 发送客户端请求到指定的 Raft 节点。
 func (t *Transport) SendClientRequest(target string, req *param.ClientArgs, resp *param.ClientReply) error {
-	// 客户端请求通常直接发送给 Leader。
-	// 在我们的测试框架中，target 可能是节点的 ID。
-	// 如果 target 是地址（例如客户端直连），我们需要处理。
-	// 但在当前的集成测试中，我们通过 Raft 对象调用 ClientRequest，Raft 内部处理转发。
-	// 如果 Raft 需要转发给 Leader，它会调用 Transport.SendClientRequest。
-	// 此时 target 是 Leader 的 ID。
-	return t.remoteCall(target, "RaftRPC.ClientRequest", req, resp, defaultRPCTimeout)
+	return t.remoteCall(target, "ClientRequest", req, resp, defaultRPCTimeout)
 }

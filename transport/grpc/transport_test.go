@@ -4,38 +4,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 
 	"github.com/xmh1011/go-raft/param"
+	"github.com/xmh1011/go-raft/raft/api"
 )
 
-// MockRPCServer is a mock implementation of raft.RaftRPC
-type MockRPCServer struct {
-	mock.Mock
-}
-
-func (m *MockRPCServer) RequestVote(args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
-	ret := m.Called(args, reply)
-	return ret.Error(0)
-}
-
-func (m *MockRPCServer) AppendEntries(args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
-	ret := m.Called(args, reply)
-	return ret.Error(0)
-}
-
-func (m *MockRPCServer) InstallSnapshot(args *param.InstallSnapshotArgs, reply *param.InstallSnapshotReply) error {
-	ret := m.Called(args, reply)
-	return ret.Error(0)
-}
-
-func (m *MockRPCServer) ClientRequest(args *param.ClientArgs, reply *param.ClientReply) error {
-	ret := m.Called(args, reply)
-	return ret.Error(0)
-}
-
 func TestGRPCTransport(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	// Create two transports
 	t1, err := NewTransport("127.0.0.1:0")
 	assert.NoError(t, err)
@@ -46,10 +25,10 @@ func TestGRPCTransport(t *testing.T) {
 	defer t2.Close()
 
 	// Mock Raft implementation for t1 and t2
-	mockRaft1 := new(MockRPCServer)
+	mockRaft1 := api.NewMockRaftService(ctrl)
 	t1.RegisterRaft(mockRaft1)
 
-	mockRaft2 := new(MockRPCServer)
+	mockRaft2 := api.NewMockRaftService(ctrl)
 	t2.RegisterRaft(mockRaft2)
 
 	// Start transports
@@ -68,18 +47,19 @@ func TestGRPCTransport(t *testing.T) {
 	t.Run("RequestVote", func(t *testing.T) {
 		req := &param.RequestVoteArgs{
 			Term:         1,
-			CandidateId:  1,
+			CandidateID:  1,
 			LastLogIndex: 10,
 			LastLogTerm:  1,
 			PreVote:      false,
 		}
 		resp := &param.RequestVoteReply{}
 
-		mockRaft2.On("RequestVote", mock.AnythingOfType("*param.RequestVoteArgs"), mock.AnythingOfType("*param.RequestVoteReply")).Run(func(args mock.Arguments) {
-			reply := args.Get(1).(*param.RequestVoteReply)
-			reply.Term = 1
-			reply.VoteGranted = true
-		}).Return(nil)
+		mockRaft2.EXPECT().RequestVote(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(args *param.RequestVoteArgs, reply *param.RequestVoteReply) error {
+				reply.Term = 1
+				reply.VoteGranted = true
+				return nil
+			}).Times(1)
 
 		err := t1.SendRequestVote("2", req, resp)
 		assert.NoError(t, err)
@@ -91,18 +71,19 @@ func TestGRPCTransport(t *testing.T) {
 	t.Run("AppendEntries", func(t *testing.T) {
 		req := &param.AppendEntriesArgs{
 			Term:     1,
-			LeaderId: 1,
+			LeaderID: 1,
 			Entries: []param.LogEntry{
 				{Command: "cmd1", Term: 1, Index: 1},
 			},
 		}
 		resp := &param.AppendEntriesReply{}
 
-		mockRaft2.On("AppendEntries", mock.AnythingOfType("*param.AppendEntriesArgs"), mock.AnythingOfType("*param.AppendEntriesReply")).Run(func(args mock.Arguments) {
-			reply := args.Get(1).(*param.AppendEntriesReply)
-			reply.Success = true
-			reply.Term = 1
-		}).Return(nil)
+		mockRaft2.EXPECT().AppendEntries(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(args *param.AppendEntriesArgs, reply *param.AppendEntriesReply) error {
+				reply.Success = true
+				reply.Term = 1
+				return nil
+			}).Times(1)
 
 		err := t1.SendAppendEntries("2", req, resp)
 		assert.NoError(t, err)
@@ -118,11 +99,12 @@ func TestGRPCTransport(t *testing.T) {
 		}
 		resp := &param.ClientReply{}
 
-		mockRaft2.On("ClientRequest", mock.AnythingOfType("*param.ClientArgs"), mock.AnythingOfType("*param.ClientReply")).Run(func(args mock.Arguments) {
-			reply := args.Get(1).(*param.ClientReply)
-			reply.Success = true
-			reply.Result = "ok"
-		}).Return(nil)
+		mockRaft2.EXPECT().ClientRequest(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(args *param.ClientArgs, reply *param.ClientReply) error {
+				reply.Success = true
+				reply.Result = "ok"
+				return nil
+			}).Times(1)
 
 		err := t1.SendClientRequest("2", req, resp)
 		assert.NoError(t, err)
