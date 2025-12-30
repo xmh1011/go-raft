@@ -1,6 +1,6 @@
 module github.com/xmh1011/go-raft
 
-go 1.24.4
+go 1.25
 
 require (
 	github.com/golang/mock v1.6.0

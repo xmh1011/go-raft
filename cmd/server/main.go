@@ -61,11 +61,8 @@ func runServer(_ *cobra.Command, _ []string) {
 
 // Server represents the Raft server instance
 type Server struct {
-	config     Config
-	raft       *raft.Raft
-	transport  transport.Transport
-	store      storage.Storage
-	commitChan chan param.CommitEntry
+	config Config
+	raft   *raft.Raft
 }
 
 // NewServer creates a new Server instance
@@ -95,23 +92,20 @@ func NewServer(cfg Config) (*Server, error) {
 	rf := raft.NewRaft(cfg.NodeID, peerIDs, store, stateMachine, trans, commitChan)
 
 	return &Server{
-		config:     cfg,
-		raft:       rf,
-		transport:  trans,
-		store:      store,
-		commitChan: commitChan,
+		config: cfg,
+		raft:   rf,
 	}, nil
 }
 
 // Start starts the Raft server components
 func (s *Server) Start() error {
 	// Register Raft to transport
-	s.transport.RegisterRaft(s.raft)
+	s.raft.Transport().RegisterRaft(s.raft)
 
 	// Start transport service
 	go func() {
-		log.Printf("Starting %s transport service on %s", s.config.TransportType, s.transport.Addr())
-		if err := s.transport.Start(); err != nil {
+		log.Printf("Starting %s transport service on %s", s.config.TransportType, s.raft.Transport().Addr())
+		if err := s.raft.Transport().Start(); err != nil {
 			log.Fatalf("Failed to start transport service: %v", err)
 		}
 	}()
@@ -130,11 +124,11 @@ func (s *Server) Start() error {
 func (s *Server) Stop() {
 	log.Println("Shutting down...")
 	s.raft.Stop()
-	if err := s.transport.Close(); err != nil {
+	if err := s.raft.Transport().Close(); err != nil {
 		log.Printf("Failed to close transport: %v", err)
 	}
-	if s.store != nil {
-		if err := s.store.Close(); err != nil {
+	if s.raft.Storage() != nil {
+		if err := s.raft.Storage().Close(); err != nil {
 			log.Printf("Failed to close store: %v", err)
 		}
 	}
@@ -142,7 +136,7 @@ func (s *Server) Stop() {
 }
 
 func (s *Server) handleCommits() {
-	for entry := range s.commitChan {
+	for entry := range s.raft.CommitChan() {
 		log.Printf("Node %d committed entry: index=%d term=%d command=%v", s.config.NodeID, entry.Index, entry.Term, entry.Command)
 	}
 }

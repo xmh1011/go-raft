@@ -51,7 +51,7 @@ type Raft struct {
 	// --- 日志与状态机相关 ---
 	commitIndex     uint64
 	lastApplied     uint64
-	commitChan      chan<- param.CommitEntry
+	commitChan      chan param.CommitEntry
 	lastAppliedCond *sync.Cond // 用于等待 lastApplied 赶上 commitIndex
 
 	// --- 快照相关 ---
@@ -79,7 +79,7 @@ type Raft struct {
 
 // NewRaft 创建一个新的 Raft 节点。
 // 注意：store 参数的类型现在是 storage.KVStorage。
-func NewRaft(id int, peerIDs []int, store storage.Storage, stateMachine storage.StateMachine, trans transport.Transport, commitChan chan<- param.CommitEntry) *Raft {
+func NewRaft(id int, peerIDs []int, store storage.Storage, stateMachine storage.StateMachine, trans transport.Transport, commitChan chan param.CommitEntry) *Raft {
 	r := &Raft{
 		id:                id,
 		peerIDs:           peerIDs,
@@ -213,6 +213,10 @@ func (r *Raft) Stop() {
 	close(r.shutdownChan)
 }
 
+func (r *Raft) CommitChan() <-chan param.CommitEntry {
+	return r.commitChan
+}
+
 // randomizedElectionTimeout 返回一个在 [electionTimeout, 2 * electionTimeout) 范围内的随机超时时间。
 // 这有助于防止选举时出现平票（split votes）。
 func (r *Raft) randomizedElectionTimeout() time.Duration {
@@ -251,6 +255,7 @@ func (r *Raft) handleLinearizableRead(cmd param.KVCommand, reply *param.ClientRe
 	// 1. 检查是否为 Leader
 	if r.state != Leader {
 		r.mu.Unlock()
+		reply.Success = false
 		reply.NotLeader = true
 		reply.LeaderHint = r.knownLeaderID
 		return nil
@@ -280,6 +285,7 @@ func (r *Raft) handleLinearizableRead(cmd param.KVCommand, reply *param.ClientRe
 
 	// 重新加锁后再次检查状态，防止在确认期间被降级
 	if r.state != Leader {
+		reply.Success = false
 		reply.NotLeader = true
 		reply.LeaderHint = r.knownLeaderID
 		return nil
@@ -476,6 +482,7 @@ func (r *Raft) proposeToLog(command any) (param.LogEntry, error) {
 // 返回值 bool 表示是否应继续处理该请求。
 func (r *Raft) preHandleClientRequest(args *param.ClientArgs, reply *param.ClientReply) bool {
 	if !r.isLeader() {
+		reply.Success = false
 		reply.NotLeader = true
 		reply.LeaderHint = r.knownLeaderID
 		return false
