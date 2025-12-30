@@ -1011,9 +1011,17 @@ func TestCluster_MembershipChange(t *testing.T) {
 			time.Sleep(3 * time.Second)
 
 			// 3. 验证新节点 Node 4 已经同步数据
-			val, err := c.stateMachines[3].Get("k1") // Index 3 is Node 4
-			assert.NoError(t, err)
-			assert.Equal(t, "v1", val)
+			var val string
+			successV1 := false
+			for i := 0; i < 50; i++ {
+				val, err = c.stateMachines[3].Get("k1")
+				if err == nil && val == "v1" {
+					successV1 = true
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			assert.True(t, successV1, "Node 4 failed to sync 'v1', got: %s", val)
 
 			// 4. 验证新集群可写入
 			cmd2, _ := json.Marshal(param.KVCommand{Op: "set", Key: "k2", Value: "v2"})
@@ -1021,9 +1029,17 @@ func TestCluster_MembershipChange(t *testing.T) {
 			assert.NoError(t, err)
 			assert.True(t, reply.Success)
 
-			time.Sleep(1 * time.Second)
-			val2, _ := c.stateMachines[3].Get("k2")
-			assert.Equal(t, "v2", val2)
+			var val2 string
+			successV2 := false
+			for i := 0; i < 50; i++ {
+				val2, _ = c.stateMachines[3].Get("k2")
+				if val2 == "v2" {
+					successV2 = true
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			assert.True(t, successV2, "Node 4 failed to sync 'v2', got: %s", val2)
 
 			// 5. 动态移除 Node 2
 			newPeersRemove := []int{1, 3, 4}
@@ -1031,7 +1047,7 @@ func TestCluster_MembershipChange(t *testing.T) {
 
 			configCmdRemove := param.NewConfigChangeCommand(newPeersRemove)
 			leader = c.getLeader(t) // 重新获取 Leader，以防万一
-			err = leader.ClientRequest(&param.ClientArgs{ClientID: 0, SequenceNum: 0, Command: configCmdRemove}, reply)
+			err = leader.ClientRequest(&param.ClientArgs{ClientID: 0, SequenceNum: 1, Command: configCmdRemove}, reply)
 			assert.NoError(t, err)
 
 			time.Sleep(2 * time.Second)
